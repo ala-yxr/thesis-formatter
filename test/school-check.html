@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>school-check</title>
+</head>
+<body>
+<!-- UI 冒烟测试（v1.3）：
+     1. 学校要求下拉存在、默认选中「重庆工程学院（附件8）」、lineSpacing=exact:20
+     2. 切换到「通用本科规范」→ lineSpacing=multiple:1.5、marginTop=3；切回 → exact:20
+     3. 上传要求文档 → modal 出现 → 命名「测试大学」保存 → 下拉出现该校且自动切换、设置被应用
+     4. 切回内置再切回「测试大学」→ 该校设置恢复（marginTop=3.3）
+     5. 删除「测试大学」→ 下拉只剩内置、删除按钮隐藏 -->
+<iframe id="app" src="/论文格式助手/index.html" width="1200" height="900" style="border:0"></iframe>
+<script src="../libs/jszip.min.js"></script>
+<script>
+var done = false, finalTitle = '', steps = [];
+var phase = 0; // 0=默认值 1=等modal 2=等保存完成 3=切换往返+删除 4=验证删除
+var lastOverlayVisible = null;
+var app = null;
+
+function w() { return document.getElementById('app').contentWindow; }
+
+function checkVisible(win, el) {
+  return win.getComputedStyle(el).display !== 'none' && !el.hidden;
+}
+
+function buildMinDocx() {
+  var W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  var xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="' + W + '"><w:body>' +
+    '<w:p><w:r><w:t>重庆工程学院本科毕业设计（论文）撰写格式要求</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>行距固定20磅</w:t></w:r></w:p>' +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'blob' });
+}
+
+function uploadDocxTo(win, inputId, fileName) {
+  buildMinDocx().then(function (blob) {
+    var file = new win.File([blob], fileName, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    var dt = new win.DataTransfer();
+    dt.items.add(file);
+    var input = win.document.getElementById(inputId);
+    input.files = dt.files;
+    input.dispatchEvent(new win.Event('change', { bubbles: true }));
+  });
+}
+
+function fail(msg) { steps.push('FAIL: ' + msg); finalTitle = 'SCHOOL_CHECK:FAIL' + JSON.stringify(steps); done = true; }
+
+setInterval(function () {
+  if (done) { document.title = finalTitle; return; }
+  try {
+    var win = w();
+    if (!win.document || win.document.readyState !== 'complete') {
+      document.title = 'DBG:iframe-not-ready';
+      return;
+    }
+    var ov = win.document.getElementById('overlay');
+    var sel = win.document.getElementById('schoolPreset');
+    var delBtn = win.document.getElementById('btnDelSchool');
+    var modal = win.document.getElementById('addSchoolModal');
+    var nameInput = win.document.getElementById('schoolNameInput');
+    if (!ov || !sel || !delBtn || !modal || !nameInput) return;
+    document.title = 'DBG:phase=' + phase;
+
+    var vis = checkVisible(win, ov);
+    if (vis !== lastOverlayVisible) lastOverlayVisible = vis;
+    var ready = ov.hidden && !vis;
+    var mt = function () { return win.document.getElementById('marginTop').value; };
+    var ls = function () { return win.document.getElementById('lineSpacing').value; };
+    var optTexts = function () { var o = []; for (var i = 0; i < sel.options.length; i++) o.push(sel.options[i].text); return o; };
+    var selCustom = function () { return /^custom-/.test(sel.value) && sel.options[sel.selectedIndex].text === '测试大学'; };
+
+    /* 阶段0：默认值 + 内置切换 */
+    if (phase === 0 && ready && sel.options.length >= 2) {
+      if (!(sel.value === 'cqgc' && ls() === 'exact:20')) return fail('默认下拉值不对: ' + sel.value + '/' + ls());
+      sel.value = 'generic';
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      var ok2 = ls() === 'multiple:1.5' && mt() === '3';
+      steps.push('切换通用预设: ' + ok2);
+      if (!ok2) return fail('切换通用预设未生效');
+      sel.value = 'cqgc';
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      var ok3 = ls() === 'exact:20';
+      steps.push('切回重庆工程学院: ' + ok3);
+      if (!ok3) return fail('切回未生效');
+
+      // 为自定义学校调整一个字段（marginTop=3.3）后上传要求文档
+      var mtEl = win.document.getElementById('marginTop');
+      mtEl.value = '3.3';
+      mtEl.dispatchEvent(new win.Event('change', { bubbles: true }));
+      uploadDocxTo(win, 'fileSchool', '测试大学格式要求.docx');
+      phase = 1;
+      return;
+    }
+
+    /* 阶段1：等 modal 出现 → 命名 → 保存 */
+    if (phase === 1) {
+      if (modal.hidden) return; // 等读取文档完成弹出 modal
+      nameInput.value = '测试大学';
+      win.document.getElementById('btnAddSchoolConfirm').click();
+      phase = 2;
+      return;
+    }
+
+    /* 阶段2：等保存完成（下拉出现「测试大学」且选中、设置恢复 3.3、删除按钮可见） */
+    if (phase === 2 && ready) {
+      if (modal.hidden && selCustom() && mt() === '3.3' && !delBtn.hidden) {
+        steps.push('添加学校: 选项=' + optTexts().join('|') + ' 选中=' + sel.options[sel.selectedIndex].text + ' marginTop=' + mt() + ' 删除按钮可见');
+        phase = 3;
+        return;
+      }
+      if (!modal.hidden) return; // 保存还在进行或失败重试
+      return fail('添加学校预设未生效: options=' + optTexts().join('|') + ' value=' + sel.value + ' mt=' + mt() + ' delHidden=' + delBtn.hidden);
+    }
+
+    /* 阶段3：切回内置 → 再切回自定义 → 删除自定义 */
+    if (phase === 3 && ready) {
+      sel.value = 'cqgc';
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      var backBuiltin = mt() === '2.5';
+      for (var j = 0; j < sel.options.length; j++) {
+        if (/^custom-/.test(sel.options[j].value)) { sel.value = sel.options[j].value; break; }
+      }
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      var backCustom = mt() === '3.3' && selCustom();
+      steps.push('切换往返: 内置marginTop=' + mt() + ' 恢复自定义=' + backCustom);
+      if (!backBuiltin || !backCustom) return fail('切换往返失败');
+      delBtn.click();
+      phase = 4;
+      return;
+    }
+
+    /* 阶段4：验证删除结果 */
+    if (phase === 4 && ready) {
+      var okDel = optTexts().length === 2 && delBtn.hidden && mt() === '2.5';
+      steps.push('删除后: 选项=' + optTexts().join('|') + ' 删除按钮隐藏=' + delBtn.hidden + ' marginTop=' + mt() + ' → ' + okDel);
+      if (!okDel) return fail('删除自定义学校失败');
+      finalTitle = 'SCHOOL_CHECK:' + JSON.stringify({ ok: true, steps: steps });
+      done = true;
+    }
+  } catch (e) { /* iframe 尚未加载完 */ }
+}, 150);
+</script>
+</body>
+</html>

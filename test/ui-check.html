@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>ui-check</title>
+</head>
+<body>
+<!-- UI 冒烟测试：
+     1. hidden 元素的计算样式是否真的隐藏
+     2. 模拟上传 docx → 遮罩出现 → 格式化完成 → 遮罩消失、下载按钮启用 -->
+<iframe id="app" src="/论文格式助手/index.html" width="1200" height="900" style="border:0"></iframe>
+<script src="../libs/jszip.min.js"></script>
+<script>
+var done = false, finalTitle = '';
+var uploaded = false;
+var timeline = []; // 遮罩显示状态时间线
+var lastOverlayVisible = null;
+
+function checkVisible(w, el) {
+  return w.getComputedStyle(el).display !== 'none' && !el.hidden;
+}
+
+function buildTestDocx() {
+  var W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  var paras = [
+    '毕业设计（论文）', '2026年5月',
+    '摘  要', '本文设计并实现了一套智能养老监护系统，系统基于STM32单片机，实现了健康监测功能。',
+    '关键词：STM32；传感器；健康监测',
+    'ABSTRACT', 'This paper designs an intelligent elderly care monitoring system based on STM32.',
+    'Keywords:STM32; Sensors',
+    '1 绪论', '1.1 研究背景', '随着我国老龄化程度不断加深，传统养老模式难以满足现代社会的需求。',
+    '参考文献', '[1] 孙家广.计算机图形学[M].北京:清华大学出版社,1995:15-18.'
+  ];
+  var body = '';
+  paras.forEach(function (t) {
+    body += '<w:p><w:r><w:t>' + t + '</w:t></w:r></w:p>';
+  });
+  var xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="' + W + '"><w:body>' + body +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'blob' });
+}
+
+function uploadToApp(w) {
+  buildTestDocx().then(function (blob) {
+    var file = new w.File([blob], '测试论文.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    var dt = new w.DataTransfer();
+    dt.items.add(file);
+    var input = w.document.getElementById('fileInput');
+    input.files = dt.files;
+    input.dispatchEvent(new w.Event('change', { bubbles: true }));
+    uploaded = true;
+  });
+}
+
+setInterval(function () {
+  if (done) { document.title = finalTitle; return; }
+  try {
+    var w = document.getElementById('app').contentWindow;
+    if (!w.document || w.document.readyState !== 'complete') return;
+    var ov = w.document.getElementById('overlay');
+    var fb = w.document.getElementById('filebar');
+    if (!ov || !fb) return;
+
+    var vis = checkVisible(w, ov);
+    if (vis !== lastOverlayVisible) { timeline.push({ t: Math.round(performance.now() / 100) / 10 + 's', visible: vis }); lastOverlayVisible = vis; }
+
+    // 阶段1：初始隐藏检查
+    if (!uploaded && !w.document.getElementById('filebar').hidden) return;
+    if (!uploaded && !vis && ov.hidden && fb.hidden) {
+      // 初始状态正确，开始上传
+      uploadToApp(w);
+      return;
+    }
+    // 阶段2：等待上传完成 + 格式化结束
+    if (uploaded) {
+      var btn = w.document.getElementById('btnDownload');
+      var btnEnabled = btn && !btn.disabled;
+      var overlayHidden = ov.hidden && !vis;
+      if (btnEnabled && overlayHidden) {
+        var filebarVis = checkVisible(w, fb);
+        finalTitle = 'UI_E2E:' + JSON.stringify({
+          ok: true,
+          timeline: timeline,
+          downloadEnabled: btnEnabled,
+          overlayHidden: overlayHidden,
+          filebarVisibleAfterUpload: filebarVis,
+          statsShown: !w.document.getElementById('statsCard').hidden
+        });
+        done = true;
+      }
+    }
+  } catch (e) { /* iframe 尚未加载完 */ }
+}, 150);
+</script>
+</body>
+</html>

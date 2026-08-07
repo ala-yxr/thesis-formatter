@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>smoke</title>
+</head>
+<body>
+<!-- 浏览器端到端冒烟测试：真实浏览器环境下执行 读取docx → 格式化 → 重打包 → 重新解包校验 -->
+<script src="../libs/jszip.min.js"></script>
+<script src="../libs/mammoth.browser.min.js"></script>
+<script src="../js/formatter.js"></script>
+<script>
+(async function () {
+  // headless --virtual-time-budget 模式下，保持定时器存活才能让虚拟时钟推进到 dump
+  var done = false, finalTitle = '';
+  setInterval(function () {
+    if (done) document.title = finalTitle;
+  }, 50);
+
+  var T0 = performance.now();
+  function report(step, extra) {
+    var ms = Math.round(performance.now() - T0);
+    finalTitle = 'STEP:' + step + ':' + ms + 'ms' + (extra ? ':' + JSON.stringify(extra) : '');
+    if (step === 'done' || step === 'ERROR') done = true;
+    document.title = finalTitle;
+    document.body.textContent = document.title;
+  }
+  report('start');
+  try {
+    if (typeof FormatTool === 'undefined') throw new Error('FormatTool 未加载');
+    var files = ['/CYX_毕业设计.docx'];
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var res = await fetch(f);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var buf = await res.arrayBuffer();
+      report('formatting');
+      var out = await FormatTool.formatDocx(buf, FormatTool.DEFAULTS, { format: 'blob' });
+      report('rezipping');
+      var zip = await JSZip.loadAsync(await out.data.arrayBuffer());
+      var docXml = await zip.file('word/document.xml').async('string');
+      new DOMParser().parseFromString(docXml, 'application/xml');
+      report('previewing');
+      // 与 app.js 相同的预览路径：mammoth + 图片压缩（canvas 缩放）
+      function compressPreviewImage(dataUrl) {
+        return new Promise(function (resolve) {
+          var img = new Image();
+          img.onload = function () {
+            try {
+              var MAXW = 1000;
+              if (img.width <= MAXW && img.height <= MAXW) { resolve(dataUrl); return; }
+              var scale = Math.min(1, MAXW / img.width);
+              var canvas = document.createElement('canvas');
+              canvas.width = Math.round(img.width * scale);
+              canvas.height = Math.round(img.height * scale);
+              var ctx = canvas.getContext('2d');
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL('image/jpeg', 0.82));
+            } catch (e) { resolve(dataUrl); }
+          };
+          img.onerror = function () { resolve(dataUrl); };
+          img.src = dataUrl;
+        });
+      }
+      // 与 app.js 相同的预览路径：前 12 张图压缩内嵌，其余占位
+      var imgCount = 0;
+      var html = await mammoth.convertToHtml(
+        { arrayBuffer: await out.data.arrayBuffer() },
+        {
+          convertImage: mammoth.images.imgElement(function (image) {
+            imgCount++;
+            if (imgCount > 12) {
+              return Promise.resolve({ src: '', alt: '预览已省略图片' });
+            }
+            return image.read('base64').then(function (buf) {
+              return compressPreviewImage('data:' + image.contentType + ';base64,' + buf).then(function (src) { return { src: src }; });
+            });
+          })
+        }
+      );
+      report('done', {
+        file: f, ok: true,
+        sizeMB: +(out.data.size / 1048576).toFixed(2),
+        body: out.counts.body, h1: out.counts.h1, refs: out.counts.refItem,
+        tables: out.counts.tables, images: out.counts.images,
+        previewLen: html.value.length,
+        totalMs: Math.round(performance.now() - T0)
+      });
+    }
+  } catch (e) {
+    report('ERROR', String((e && e.message) || e));
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>论文格式助手 — 毕业论文一键标准化格式</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <path d="M14 2v6h6"/>
+          <path d="M8 13h8M8 17h5"/>
+        </svg>
+      </span>
+      <span class="brand-name">论文格式助手</span>
+    </div>
+    <div class="brand-tag">
+      <span class="pill-local">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        纯本地处理 · 文件不上传
+      </span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- 上传区 -->
+  <section class="card upload-card">
+    <div class="dropzone" id="dropzone" tabindex="0">
+      <input type="file" id="fileInput" accept=".docx" hidden>
+      <div class="dz-icon">
+        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <path d="M17 8l-5-5-5 5"/>
+          <path d="M12 3v12"/>
+        </svg>
+      </div>
+      <div class="dz-title">将论文拖到这里，或 <span class="dz-link">点击选择文件</span></div>
+      <div class="dz-hint">支持 Word 文档（.docx），可上传多篇依次处理</div>
+    </div>
+    <div class="filebar" id="filebar" hidden>
+      <span class="file-icon">📄</span>
+      <span class="file-name" id="fileName"></span>
+      <span class="file-size" id="fileSize"></span>
+      <button class="btn btn-ghost btn-sm" id="btnReupload">更换文件</button>
+    </div>
+  </section>
+
+  <div class="layout">
+
+    <!-- 设置面板 -->
+    <aside class="card settings">
+      <div class="settings-head">
+        <h2>格式设置</h2>
+        <button class="btn btn-ghost btn-sm" id="btnReset">恢复默认</button>
+      </div>
+      <div class="row school-row">
+        <label for="schoolPreset">学校要求</label>
+        <select id="schoolPreset"></select>
+      </div>
+      <div class="school-actions">
+        <button class="btn btn-ghost btn-sm" id="btnAddSchool">＋ 添加学校要求</button>
+        <button class="btn btn-ghost btn-sm btn-danger" id="btnDelSchool" hidden>删除该校</button>
+      </div>
+      <p class="settings-sub" id="schoolPresetDesc">选择学校后自动套用该校格式要求，仍可手动微调各项</p>
+
+      <details open>
+        <summary>页面设置</summary>
+        <div class="group">
+          <div class="row">
+            <label>上边距 <em>(cm)</em></label>
+            <input type="number" id="marginTop" min="0.5" max="6" step="0.01" value="2.5">
+          </div>
+          <div class="row">
+            <label>下边距 <em>(cm)</em></label>
+            <input type="number" id="marginBottom" min="0.5" max="6" step="0.01" value="2.5">
+          </div>
+          <div class="row">
+            <label>左边距 <em>(cm)</em></label>
+            <input type="number" id="marginLeft" min="0.5" max="6" step="0.01" value="2.5">
+          </div>
+          <div class="row">
+            <label>右边距 <em>(cm)</em></label>
+            <input type="number" id="marginRight" min="0.5" max="6" step="0.01" value="2.5">
+          </div>
+          <div class="row">
+            <label>页码</label>
+            <select id="pageNumber">
+              <option value="center" selected>底端居中</option>
+              <option value="right">底端右侧</option>
+              <option value="none">不添加</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <details open>
+        <summary>正文</summary>
+        <div class="group">
+          <div class="row">
+            <label>中文字体</label>
+            <select id="bodyFont">
+              <option value="宋体" selected>宋体</option>
+              <option value="黑体">黑体</option>
+              <option value="楷体">楷体</option>
+              <option value="仿宋">仿宋</option>
+              <option value="仿宋_GB2312">仿宋_GB2312</option>
+              <option value="微软雅黑">微软雅黑</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>西文字体</label>
+            <select id="latinFont">
+              <option value="Times New Roman" selected>Times New Roman</option>
+              <option value="Arial">Arial</option>
+              <option value="Calibri">Calibri</option>
+              <option value="Consolas">Consolas</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>字号</label>
+            <select id="bodySize">
+              <option value="10.5">五号 (10.5pt)</option>
+              <option value="12" selected>小四 (12pt)</option>
+              <option value="14">四号 (14pt)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>行距</label>
+            <select id="lineSpacing">
+              <option value="exact:20" selected>固定 20 磅（学校要求）</option>
+              <option value="exact:18">固定 18 磅</option>
+              <option value="exact:24">固定 24 磅</option>
+              <option value="multiple:1.5">1.5 倍行距</option>
+              <option value="multiple:2">2 倍行距</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>首行缩进</label>
+            <select id="firstLineChars">
+              <option value="0">无缩进</option>
+              <option value="1">1 字符</option>
+              <option value="2" selected>2 字符</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>学校格式选项</summary>
+        <div class="group">
+          <div class="row row-check">
+            <label>表格仅保留顶底线（1.5 磅）</label>
+            <input type="checkbox" id="threeLineTable" checked>
+          </div>
+          <div class="row row-check">
+            <label>一级标题之间换页</label>
+            <input type="checkbox" id="chapterPageBreak" checked>
+          </div>
+          <div class="row row-check">
+            <label>分节页码（前置罗马数字 / 主体阿拉伯数字）</label>
+            <input type="checkbox" id="pageNumberSplit" checked>
+          </div>
+          <p class="settings-sub" style="margin-top:8px">表格：清除内部所有线，仅保留顶线/底线两根 1.5 磅线；换页：每章另起一页；页码：摘要/目录用 Ⅰ Ⅱ Ⅲ，正文从绪论起用 1 2 3。</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>标题</summary>
+        <div class="group">
+          <div class="row">
+            <label>论文题目字号</label>
+            <select id="titleSize">
+              <option value="22" selected>二号 (22pt)</option>
+              <option value="18">小二 (18pt)</option>
+              <option value="16">三号 (16pt)</option>
+            </select>
+          </div>
+          <div class="row row-check">
+            <label>题目加粗</label>
+            <input type="checkbox" id="titleBold">
+          </div>
+          <div class="row">
+            <label>一级标题字号</label>
+            <select id="h1Size">
+              <option value="16" selected>三号 (16pt)</option>
+              <option value="15">小三 (15pt)</option>
+              <option value="14">四号 (14pt)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>一级标题对齐</label>
+            <select id="h1Jc">
+              <option value="center" selected>居中</option>
+              <option value="left">左对齐</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>二级标题字号</label>
+            <select id="h2Size">
+              <option value="15" selected>小三 (15pt)</option>
+              <option value="14">四号 (14pt)</option>
+              <option value="12">小四 (12pt)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>三级标题字号</label>
+            <select id="h3Size">
+              <option value="14" selected>四号 (14pt)</option>
+              <option value="12">小四 (12pt)</option>
+              <option value="10.5">五号 (10.5pt)</option>
+            </select>
+          </div>
+          <p class="settings-sub" style="margin-top:8px">按附件8：一级三号黑体居中、二级小三号黑体居左、三级四号黑体居左并右缩进两个字。</p>
+          <div class="row row-check">
+            <label>标题加粗</label>
+            <input type="checkbox" id="headingBold">
+            <em class="hint">黑体本身较粗，一般不加粗</em>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>摘要与关键词</summary>
+        <div class="group">
+          <div class="row">
+            <label>摘要标题字号</label>
+            <select id="absHeadSize">
+              <option value="16" selected>三号 (16pt)</option>
+              <option value="15">小三 (15pt)</option>
+              <option value="22">二号 (22pt)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>摘要正文字号</label>
+            <select id="absBodySize">
+              <option value="12" selected>小四 (12pt)</option>
+              <option value="10.5">五号 (10.5pt)</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>参考文献</summary>
+        <div class="group">
+          <div class="row">
+            <label>条目字号</label>
+            <select id="refSize">
+              <option value="10.5" selected>五号 (10.5pt)</option>
+              <option value="12">小四 (12pt)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>悬挂缩进</label>
+            <select id="refHangingChars">
+              <option value="0" selected>无（序号左顶格）</option>
+              <option value="2">2 字符</option>
+              <option value="1.5">1.5 字符</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>图表题注</summary>
+        <div class="group">
+          <div class="row">
+            <label>字体</label>
+            <select id="captionFont">
+              <option value="宋体" selected>宋体（学校要求）</option>
+              <option value="黑体">黑体</option>
+              <option value="楷体">楷体</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>字号</label>
+            <select id="captionSize">
+              <option value="10.5" selected>五号 (10.5pt)</option>
+              <option value="12">小四 (12pt)</option>
+              <option value="9">小五 (9pt)</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <div class="settings-actions">
+        <button class="btn btn-primary btn-block" id="btnFormat" disabled>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+          一键格式化
+        </button>
+      </div>
+    </aside>
+
+    <!-- 结果区 -->
+    <section class="result">
+      <div class="card stats-card" id="statsCard" hidden>
+        <div class="stats-head">
+          <h2>结构识别结果</h2>
+          <span class="stats-time" id="statsTime"></span>
+        </div>
+        <div class="chips" id="chips"></div>
+        <div class="stats-notes" id="statsNotes"></div>
+      </div>
+
+      <div class="card preview-card">
+        <div class="preview-toolbar">
+          <h2>格式预览</h2>
+          <div class="preview-actions">
+            <button class="btn btn-ghost btn-sm" id="btnPreviewReformat" disabled>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+              </svg>
+              重新格式化
+            </button>
+            <button class="btn btn-primary btn-sm" id="btnDownload" disabled>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <path d="M7 10l5 5 5-5"/>
+                <path d="M12 15V3"/>
+              </svg>
+              下载 Word 文档
+            </button>
+          </div>
+        </div>
+        <div class="preview-status" id="previewStatus" hidden></div>
+        <div class="preview-empty" id="previewEmpty">
+          <div class="pe-icon">
+            <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <path d="M14 2v6h6"/>
+              <path d="M12 18v-6"/><path d="M9 15l3 3 3-3"/>
+            </svg>
+          </div>
+          <p>上传论文后，此处显示格式化效果预览</p>
+          <p class="pe-sub">图片、表格、公式在原文档中完整保留，预览仅供参考</p>
+        </div>
+        <iframe class="preview-frame" id="previewFrame" hidden></iframe>
+      </div>
+    </section>
+  </div>
+
+  <!-- 使用说明 -->
+  <section class="card help">
+    <details>
+      <summary>使用说明与注意事项</summary>
+      <ul>
+        <li><b>隐私安全：</b>所有处理都在你的浏览器本地完成，文件不会上传到任何服务器。</li>
+        <li><b>学校要求：</b>设置面板顶部的下拉框内置多套学校格式预设（如重庆工程学院《附件8》），选择后自动切换全部格式要求；点击「＋ 添加学校要求」可上传该校的要求文档，保存当前格式设置为该校预设（下次直接切换），也可删除自定义预设。</li>
+        <li><b>格式依据：</b>重庆工程学院预设按《附件8 本科毕业设计（论文）撰写格式要求》：页边距 2.5cm、行距固定 20 磅、一级三号黑体居中、二级小三号黑体居左、三级四号黑体居左右缩两字、图题表题五号宋体、参考文献五号宋体序号左顶格、三线表、一级标题换页、前置罗马数字页码等。</li>
+        <li><b>封面保留：</b>「摘要」之前的页面（封面、声明、任务书等）保持原样不动，避免破坏学校模板。</li>
+        <li><b>目录：</b>自动识别目录页（「目录/目次」标题、Word 目录样式 TOC、超链接条目、点线页码等特征），条目按小四宋体、2-4 级、下级右缩两字重排；如需更新页码，请在 Word 中右键目录 →「更新域」。</li>
+        <li><b>公式：</b>公式原样保留（不会改动字号），预览中可能显示不完整，以 Word 为准。</li>
+        <li><b>表格：</b>默认清除表格内部所有线，仅保留顶线/底线两根 1.5 磅线（可关闭）；图片全部原样保留。</li>
+        <li><b>图片：</b>所有含图片的段落自动改为单倍行距，避免固定行距把图片截断显示不全。</li>
+        <li><b>页码：</b>若原文档已有页码则保留数字样式；封面（首页）不显示页码；分节页码功能让摘要/目录用罗马数字、正文从绪论起用阿拉伯数字从 1 重新编号（与附件8一致，可关闭）。</li>
+        <li><b>页眉：</b>页眉文字（校名 + 章名）涉及动态章节名，需在 Word 中按学校要求手动设置；页眉/页脚距离已按 1.6cm / 2.1cm 设置。</li>
+        <li><b>结构识别：</b>按「摘要 → 关键词 → Abstract → Keywords → 目录 → 章节 → 参考文献 → 致谢/附录」自动识别，个别特殊版式可能需要手工微调。</li>
+      </ul>
+    </details>
+  </section>
+</main>
+
+<footer class="footer">
+  <p>论文格式助手 v1.3 — 多学校格式预设切换（支持上传要求文档添加学校）/ 目录识别重排 / 图片段落单倍行距 / 表格仅保留顶底线 1.5 磅</p>
+</footer>
+
+<div class="toast" id="toast" hidden></div>
+<div class="overlay" id="overlay" hidden>
+  <div class="spinner-wrap">
+    <div class="spinner"></div>
+    <p id="overlayText">正在格式化…</p>
+  </div>
+</div>
+
+<input type="file" id="fileSchool" accept=".docx" hidden>
+<div class="modal" id="addSchoolModal" hidden>
+  <div class="modal-card">
+    <h3>添加学校要求</h3>
+    <p>请先在左侧设置面板中调整好该校的格式要求（页边距、行距、字号等），保存后将成为该校预设，切换学校时自动套用全部设置。</p>
+    <p class="doc-name" id="schoolDocName"></p>
+    <input type="text" id="schoolNameInput" placeholder="学校名称，如：重庆大学">
+    <div class="modal-actions">
+      <button class="btn btn-ghost btn-sm" id="btnAddSchoolCancel">取消</button>
+      <button class="btn btn-primary btn-sm" id="btnAddSchoolConfirm">保存该校要求</button>
+    </div>
+  </div>
+</div>
+
+<script src="libs/jszip.min.js"></script>
+<script src="libs/mammoth.browser.min.js"></script>
+<script src="js/presets.js?v=16"></script>
+<script src="js/formatter.js?v=16"></script>
+<script src="js/app.js?v=16"></script>
+</body>
+</html>

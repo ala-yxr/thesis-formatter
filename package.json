@@ -1,0 +1,13 @@
+{
+  "name": "thesis-formatter",
+  "version": "1.0.0",
+  "description": "毕业论文一键标准化格式工具（纯前端，本地处理）",
+  "private": true,
+  "scripts": {
+    "test": "node test/run-test.mjs"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.10",
+    "jszip": "^3.10.1"
+  }
+}
