@@ -398,7 +398,7 @@
       tocHead:   mk(s.h1Font, latin, s.absHeadSize, 'center', { bold: false }),
       tocItem:   mk(east, latin, s.bodySize, 'left'),   // 目录条目缩进按层级动态设置
       h1:        mk(s.h1Font, latin, s.h1Size, s.h1Jc, { bold: s.headingBold }),
-      h2:        mk(s.h2Font, latin, s.h2Size, 'left', { bold: s.headingBold, line: 240, lineRule: 'auto' }), // 二级标题单倍行距
+      h2:        mk(s.h2Font, latin, s.h2Size, 'left', { bold: s.headingBold }), // 行距固定 20 磅（附件8）
       h3:        mk(s.h3Font, latin, s.h3Size, 'left', { bold: s.headingBold, indent: 2 }), // 首行缩进两字符
       body:      mk(east, latin, s.bodySize, 'both', { indent: s.firstLineChars }),
       caption:   mk(s.captionFont, latin, s.captionSize, 'center', { bold: false }),

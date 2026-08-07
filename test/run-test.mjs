@@ -16,7 +16,7 @@ const FormatTool = (await import('../js/formatter.js')).default;
 const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcCandidates = ['CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx', 'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx', 'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx']
+const srcCandidates = ['CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx', 'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx', 'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx']
   .map(n => path.resolve(__dirname, '../../' + n))
   .find(f => fs.existsSync(f));
 const src = srcCandidates || path.resolve(__dirname, '../../CYX_毕业设计.docx');
@@ -195,7 +195,7 @@ for (const rPr of Array.from(rPrs)) {
 }
 console.log(`✓ 小三(30) run: ${sz30} | 四号(28) run: ${sz28}`);
 
-// 6. 二级标题单倍行距（line=240 auto）
+// 6. 二级标题固定20磅行距（附件8：全文行距固定20磅）
 const RE_H2_OUT = /^\d{1,2}\.\d{1,2}(?![\d.])\s*[^\d.]/;
 let h2n = 0, h2ok = 0;
 for (const p of Array.from(doc.getElementsByTagNameNS(W_NS, 'body')[0].childNodes).filter(n => n.nodeType === 1 && n.localName === 'p')) {
@@ -206,10 +206,10 @@ for (const p of Array.from(doc.getElementsByTagNameNS(W_NS, 'body')[0].childNode
   h2n++;
   const pPr = Array.from(p.childNodes).find(n => n.nodeType === 1 && n.localName === 'pPr');
   const sp = pPr && Array.from(pPr.childNodes).find(n => n.nodeType === 1 && n.localName === 'spacing');
-  if (sp && sp.getAttributeNS(W_NS, 'line') === '240' && sp.getAttributeNS(W_NS, 'lineRule') === 'auto') h2ok++;
+  if (sp && sp.getAttributeNS(W_NS, 'line') === '400' && sp.getAttributeNS(W_NS, 'lineRule') === 'exact') h2ok++;
 }
-console.log(`✓ 二级标题单倍行距: ${h2ok}/${h2n} 段（line=240 auto）`);
-if (h2ok !== h2n) throw new Error('二级标题未全部改为单倍行距');
+console.log(`✓ 二级标题固定20磅行距: ${h2ok}/${h2n} 段（line=400 exact）`);
+if (h2ok !== h2n) throw new Error('二级标题未改为固定 20 磅行距');
 
 /* ---------- v1.2 新规则校验 ---------- */
 
