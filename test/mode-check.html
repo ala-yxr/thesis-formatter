@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>mode-check</title>
+</head>
+<body>
+<!-- 工科/文科模式隔离冒烟测试（v1.4）：
+     1. 清空 localStorage → 学科选择页可见
+     2. 点「工科论文」→ 选择页隐藏、下拉=[重庆工程学院（附件8）]、lineSpacing=exact:20、marginTop=2.5
+     3. 顶栏「切换」→ 点「文科论文」→ 下拉=[通用文科规范（示例）]、lineSpacing=multiple:1.5、marginTop=3
+     4. 文科模式改 marginTop=3.3 + 添加自定义学校「测试大学」→ 出现在文科下拉并选中
+     5. 切回工科 → 下拉无「测试大学」、marginTop=2.5（隔离：文科改动不影响工科）
+     6. 切回文科 → 下拉有「测试大学」、marginTop=3.3（各学科状态独立保存并恢复）
+     7. 删除「测试大学」→ 文科下拉只剩内置 -->
+<iframe id="app" src="/论文格式助手/index.html" width="1200" height="900" style="border:0"></iframe>
+<script src="../libs/jszip.min.js"></script>
+<script>
+var done = false, finalTitle = '', steps = [];
+var phase = 0; // 0=清理+等gate 1=进工科 2=进文科 3=等modal 4=等保存 5=切回工科 6=切回文科 7=删除
+var lastOverlayVisible = null;
+
+function w() { return document.getElementById('app').contentWindow; }
+
+function checkVisible(win, el) {
+  return win.getComputedStyle(el).display !== 'none' && !el.hidden;
+}
+
+function buildMinDocx() {
+  var W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  var xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="' + W + '"><w:body>' +
+    '<w:p><w:r><w:t>重庆工程学院本科毕业设计（论文）撰写格式要求</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>行距固定20磅</w:t></w:r></w:p>' +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'blob' });
+}
+
+function uploadDocxTo(win, inputId, fileName) {
+  buildMinDocx().then(function (blob) {
+    var file = new win.File([blob], fileName, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    var dt = new win.DataTransfer();
+    dt.items.add(file);
+    var input = win.document.getElementById(inputId);
+    input.files = dt.files;
+    input.dispatchEvent(new win.Event('change', { bubbles: true }));
+  });
+}
+
+function fail(msg) { steps.push('FAIL: ' + msg); finalTitle = 'MODE_CHECK:FAIL' + JSON.stringify(steps); done = true; }
+
+setInterval(function () {
+  if (done) { document.title = finalTitle; return; }
+  try {
+    var win = w();
+    if (!win.document || win.document.readyState !== 'complete') {
+      document.title = 'DBG:iframe-not-ready';
+      return;
+    }
+    var ov = win.document.getElementById('overlay');
+    var sel = win.document.getElementById('schoolPreset');
+    var delBtn = win.document.getElementById('btnDelSchool');
+    var modal = win.document.getElementById('addSchoolModal');
+    var gate = win.document.getElementById('modeGate');
+    var gateOptions = win.document.getElementById('gateOptions');
+    var switchBtn = win.document.getElementById('btnSwitchMode');
+    var nameInput = win.document.getElementById('schoolNameInput');
+    if (!ov || !sel || !delBtn || !modal || !gate || !gateOptions || !switchBtn || !nameInput) return;
+    document.title = 'DBG:phase=' + phase;
+
+    var vis = checkVisible(win, ov);
+    if (vis !== lastOverlayVisible) lastOverlayVisible = vis;
+    var ready = ov.hidden && !vis;
+    var mt = function () { return win.document.getElementById('marginTop').value; };
+    var ls = function () { return win.document.getElementById('lineSpacing').value; };
+    var optTexts = function () { var o = []; for (var i = 0; i < sel.options.length; i++) o.push(sel.options[i].text); return o; };
+    var selCustom = function () { return /^custom-/.test(sel.value) && sel.options[sel.selectedIndex].text === '测试大学'; };
+    var gateVisible = function () { return !gate.hidden && checkVisible(win, gate); };
+
+    /* 阶段0：清空 storage → 重新加载 → 选择页必须出现 */
+    if (phase === 0) {
+      try { win.localStorage.clear(); } catch (e) {}
+      win.location.reload();
+      phase = 99; // 等待 reload 后的全新 iframe 上下文
+      return;
+    }
+    if (phase === 99) { // 等 gate 出现（新上下文里 sel 等元素会重新获取）
+      if (gateVisible() && gateOptions.children.length === 2) {
+        steps.push('选择页显示: 选项=' + Array.prototype.map.call(gateOptions.children, function (c) { return c.dataset.mode; }).join('|'));
+        phase = 1;
+      }
+      return;
+    }
+
+    /* 阶段1：点「工科论文」→ gate 隐藏、工科默认预设生效 */
+    if (phase === 1 && gateVisible()) {
+      for (var i = 0; i < gateOptions.children.length; i++) {
+        if (gateOptions.children[i].dataset.mode === 'gongke') gateOptions.children[i].click();
+      }
+      phase = 11;
+      return;
+    }
+    if (phase === 11 && ready) {
+      var okGongke = !gateVisible() && sel.value === 'cqgc' && ls() === 'exact:20' && mt() === '2.5' &&
+        optTexts().join('|') === '重庆工程学院（附件8）';
+      steps.push('进入工科: options=' + optTexts().join('|') + ' ls=' + ls() + ' mt=' + mt() + ' → ' + okGongke);
+      if (!okGongke) return fail('工科模式默认状态不对');
+      switchBtn.click();
+      phase = 2;
+      return;
+    }
+
+    /* 阶段2：点「文科论文」→ 文科默认预设生效 */
+    if (phase === 2 && gateVisible()) {
+      for (var j = 0; j < gateOptions.children.length; j++) {
+        if (gateOptions.children[j].dataset.mode === 'wenke') gateOptions.children[j].click();
+      }
+      phase = 21;
+      return;
+    }
+    if (phase === 21 && ready) {
+      var okWenke = !gateVisible() && sel.value === 'generic' && ls() === 'multiple:1.5' && mt() === '3' &&
+        optTexts().join('|') === '通用文科规范（示例）';
+      steps.push('进入文科: options=' + optTexts().join('|') + ' ls=' + ls() + ' mt=' + mt() + ' → ' + okWenke);
+      if (!okWenke) return fail('文科模式默认状态不对');
+      // 文科模式调整 marginTop=3.3 后上传要求文档建「测试大学」
+      var mtEl = win.document.getElementById('marginTop');
+      mtEl.value = '3.3';
+      mtEl.dispatchEvent(new win.Event('change', { bubbles: true }));
+      uploadDocxTo(win, 'fileSchool', '测试大学文科要求.docx');
+      phase = 3;
+      return;
+    }
+
+    /* 阶段3：等 modal → 命名保存 */
+    if (phase === 3) {
+      if (modal.hidden) return;
+      nameInput.value = '测试大学';
+      win.document.getElementById('btnAddSchoolConfirm').click();
+      phase = 4;
+      return;
+    }
+
+    /* 阶段4：等保存完成（文科下拉出现「测试大学」且选中、mt=3.3、删除按钮可见） */
+    if (phase === 4 && ready) {
+      if (modal.hidden && selCustom() && mt() === '3.3' && !delBtn.hidden) {
+        steps.push('文科添加学校: options=' + optTexts().join('|') + ' mt=' + mt());
+        phase = 5;
+        return;
+      }
+      if (!modal.hidden) return;
+      return fail('文科添加学校未生效: options=' + optTexts().join('|') + ' value=' + sel.value + ' mt=' + mt());
+    }
+
+    /* 阶段5：切回工科 → 无「测试大学」、mt 恢复 2.5（隔离验证） */
+    if (phase === 5 && ready) {
+      switchBtn.click();
+      phase = 51;
+      return;
+    }
+    if (phase === 51 && gateVisible()) {
+      for (var k = 0; k < gateOptions.children.length; k++) {
+        if (gateOptions.children[k].dataset.mode === 'gongke') gateOptions.children[k].click();
+      }
+      phase = 52;
+      return;
+    }
+    if (phase === 52 && ready) {
+      var noCustom = optTexts().indexOf('测试大学') < 0;
+      var okIso = noCustom && sel.value === 'cqgc' && mt() === '2.5';
+      steps.push('切回工科(隔离): 无测试大学=' + noCustom + ' mt=' + mt() + ' → ' + okIso);
+      if (!okIso) return fail('隔离失败: 工科下拉出现文科自定义学校 或 设置被文科污染 options=' + optTexts().join('|') + ' mt=' + mt());
+      switchBtn.click();
+      phase = 6;
+      return;
+    }
+
+    /* 阶段6：切回文科 → 自定义学校还在、mt=3.3（状态独立恢复） */
+    if (phase === 6 && gateVisible()) {
+      for (var l = 0; l < gateOptions.children.length; l++) {
+        if (gateOptions.children[l].dataset.mode === 'wenke') gateOptions.children[l].click();
+      }
+      phase = 61;
+      return;
+    }
+    if (phase === 61 && ready) {
+      var okBack = selCustom() && mt() === '3.3';
+      steps.push('切回文科(状态恢复): options=' + optTexts().join('|') + ' mt=' + mt() + ' → ' + okBack);
+      if (!okBack) return fail('文科状态未恢复: options=' + optTexts().join('|') + ' mt=' + mt());
+      delBtn.click();
+      phase = 7;
+      return;
+    }
+
+    /* 阶段7：删除「测试大学」→ 文科下拉只剩内置、恢复默认 */
+    if (phase === 7 && ready) {
+      var okDel = optTexts().length === 1 && optTexts()[0] === '通用文科规范（示例）' && delBtn.hidden && mt() === '3';
+      steps.push('删除后: options=' + optTexts().join('|') + ' 删除按钮隐藏=' + delBtn.hidden + ' mt=' + mt() + ' → ' + okDel);
+      if (!okDel) return fail('删除文科自定义学校失败');
+      finalTitle = 'MODE_CHECK:' + JSON.stringify({ ok: true, steps: steps });
+      done = true;
+    }
+  } catch (e) { /* iframe 尚未加载完 */ }
+}, 150);
+</script>
+</body>
+</html>

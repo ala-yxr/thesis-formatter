@@ -6,25 +6,66 @@
   'use strict';
 
   const $ = (sel) => document.querySelector(sel);
+  const MODES = (typeof globalThis !== 'undefined' && globalThis.MODES) || {};
+  const MODE_IDS = Object.keys(MODES);
+  const LS_MODE_KEY = 'thesis-formatter-mode';
+
+  /* ---------- 学科模式（工科/文科）完全隔离 ----------
+   * 所有状态按学科分空间保存（key 加后缀），工科与文科互不读写：
+   *   thesis-formatter-settings-gongke / -wenke      设置表单
+   *   thesis-formatter-school-gongke / -wenke        记忆的学校
+   *   thesis-formatter-custom-presets-gongke / -wenke 自定义学校
+   * 入口选择页每次进入先选学科；顶栏徽标可随时切换 */
+  let currentMode = 'gongke';
   const LS_KEY = 'thesis-formatter-settings';
   const LS_SCHOOL_KEY = 'thesis-formatter-school';
+
+  /* 当前模式下的 storage key（隔离核心：key 按学科加后缀） */
+  function modeKey(base) { return base + '-' + currentMode; }
 
   /* ---------- 学校格式预设 ----------
    * 内置：js/presets.js 中定义；自定义：用户上传要求文档后保存到 localStorage */
   const PRESETS = (typeof globalThis !== 'undefined' && globalThis.SCHOOL_PRESETS) || [];
   const LS_CUSTOM_KEY = 'thesis-formatter-custom-presets';
   function customPresets() {
-    try { return JSON.parse(localStorage.getItem(LS_CUSTOM_KEY)) || []; } catch (e) { return []; }
+    try { return JSON.parse(localStorage.getItem(modeKey(LS_CUSTOM_KEY))) || []; } catch (e) { return []; }
   }
   function saveCustomPresets(list) {
-    try { localStorage.setItem(LS_CUSTOM_KEY, JSON.stringify(list)); return true; }
+    try { localStorage.setItem(modeKey(LS_CUSTOM_KEY), JSON.stringify(list)); return true; }
     catch (e) {
       toast('保存失败：浏览器存储空间不足（要求文档较大），请删除部分预设或换更小的文档', true);
       return false;
     }
   }
+  /* 当前学科下的内置预设（下拉框按学科过滤） */
+  function modePresets() { return PRESETS.filter((p) => p.mode === currentMode); }
   function presetById(id) {
-    return PRESETS.find((p) => p.id === id) || customPresets().find((p) => p.id === id);
+    return modePresets().find((p) => p.id === id) || customPresets().find((p) => p.id === id);
+  }
+  function defaultPresetId() {
+    const def = MODES[currentMode] && MODES[currentMode].defaultPresetId;
+    if (def && presetById(def)) return def;
+    return modePresets().length ? modePresets()[0].id : null;
+  }
+
+  /* ---------- 旧版数据一次性迁移 ----------
+   * v1.3 之前所有状态都在无后缀 key 下（即工科行为），首次运行新版本
+   * 时整体搬进工科空间并删除旧 key，保证老用户工科状态不丢 */
+  function migrateLegacy() {
+    try {
+      const legacy = ['thesis-formatter-settings', 'thesis-formatter-school', 'thesis-formatter-custom-presets'];
+      const anyLegacy = legacy.some((k) => localStorage.getItem(k) !== null);
+      if (!anyLegacy) return;
+      if (currentMode === 'gongke') {
+        legacy.forEach((k) => {
+          const v = localStorage.getItem(k);
+          if (v !== null && localStorage.getItem(modeKey(k)) === null) localStorage.setItem(modeKey(k), v);
+          localStorage.removeItem(k);
+        });
+      } else {
+        legacy.forEach((k) => localStorage.removeItem(k));
+      }
+    } catch (e) { /* ignore */ }
   }
 
   const S = {
@@ -40,6 +81,7 @@
     addSchoolModal: $('#addSchoolModal'), schoolNameInput: $('#schoolNameInput'),
     schoolDocName: $('#schoolDocName'), btnAddSchoolConfirm: $('#btnAddSchoolConfirm'),
     btnAddSchoolCancel: $('#btnAddSchoolCancel'),
+    gate: $('#modeGate'), btnSwitchMode: $('#btnSwitchMode'), modeBadge: $('#modeBadge'),
   };
 
   let lastFile = null;      // 当前处理的文件
@@ -80,23 +122,78 @@
     }
   }
   function saveSettings() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(currentSettings())); } catch (e) { /* ignore */ }
-  }
-  function loadSettings() {
-    try {
-      const school = localStorage.getItem(LS_SCHOOL_KEY);
-      if (school && presetById(school)) applyPreset(school, { silent: true });
-      const raw = localStorage.getItem(LS_KEY);
-      if (raw) applySettings(JSON.parse(raw));
-    } catch (e) { /* ignore */ }
+    try { localStorage.setItem(modeKey(LS_KEY), JSON.stringify(currentSettings())); } catch (e) { /* ignore */ }
   }
 
-  /* ---------- 学校要求切换 ---------- */
+  /* ---------- 学科模式（工科/文科）切换 ---------- */
   const schoolSel = $('#schoolPreset');
   const schoolDesc = $('#schoolPresetDesc');
 
+  // 顶栏徽标 + 设置面板提示显示当前学科
+  function updateModeBadge() {
+    const m = MODES[currentMode];
+    if (!m) return;
+    if (S.modeBadge) {
+      S.modeBadge.textContent = m.label + '（' + m.sub + '）';
+      S.modeBadge.dataset.mode = currentMode;
+    }
+    const hint = $('#modeHint');
+    if (hint) hint.innerHTML = '当前模式：' + m.label + ' · 以下设置与自定义学校仅保存到' +
+      (currentMode === 'gongke' ? '工科' : '文科') + '模式，不影响' + (currentMode === 'gongke' ? '文科' : '工科');
+  }
+
+  // 从 MODES 渲染入口选择页的两个学科卡片
+  function renderGateOptions() {
+    const wrap = document.getElementById('gateOptions');
+    if (!wrap) return;
+    wrap.innerHTML = MODE_IDS.map((id) => {
+      const m = MODES[id];
+      return '<button class="gate-option" data-mode="' + id + '" type="button">' +
+        '<span class="gate-ico">' + (id === 'gongke' ? '⚙️' : '📖') + '</span>' +
+        '<span class="gate-name">' + m.label + '</span>' +
+        '<span class="gate-sub">' + (m.sub || '') + '</span>' +
+        '<span class="gate-desc">' + (m.gateDesc || '') + '</span>' +
+        '</button>';
+    }).join('');
+  }
+
+  /* 进入某学科模式：重建下拉 → 应用该校预设（记忆的学校或默认）
+     → 叠加该模式保存的手动设置 → 更新徽标 → 隐藏选择页 */
+  function enterMode(mode) {
+    if (!MODES[mode]) return;
+    currentMode = mode;
+    try { localStorage.setItem(LS_MODE_KEY, mode); } catch (e) { /* ignore */ }
+    buildSchoolOptions();
+    const savedSchool = localStorage.getItem(modeKey(LS_SCHOOL_KEY));
+    if (savedSchool && presetById(savedSchool)) applyPreset(savedSchool, { silent: true });
+    else {
+      const defId = defaultPresetId();
+      if (defId) applyPreset(defId, { silent: true });
+    }
+    const raw = localStorage.getItem(modeKey(LS_KEY));
+    if (raw) applySettings(JSON.parse(raw));
+    updateModeBadge();
+    S.gate.hidden = true;
+    if (lastFile) {
+      toast('已进入「' + MODES[mode].label + '」模式，正在按该学科格式要求重新格式化…');
+      formatFile(lastFile);
+    }
+  }
+
+  function showGate() { S.gate.hidden = false; }
+
+  function bindGate() {
+    renderGateOptions();
+    document.getElementById('gateOptions').addEventListener('click', (e) => {
+      const btn = e.target.closest('.gate-option');
+      if (btn && btn.dataset.mode) enterMode(btn.dataset.mode);
+    });
+    S.btnSwitchMode.addEventListener('click', showGate);
+  }
+
+  /* ---------- 学校要求切换 ---------- */
   function buildSchoolOptions() {
-    const all = PRESETS.concat(customPresets());
+    const all = modePresets().concat(customPresets());
     if (!all.length) { schoolSel.closest('.row').hidden = true; return; }
     schoolSel.innerHTML = all.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
     updateDelSchoolBtn();
@@ -116,7 +213,7 @@
     schoolSel.value = p.id;
     applySettings(p.settings);
     saveSettings();
-    try { localStorage.setItem(LS_SCHOOL_KEY, id); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(modeKey(LS_SCHOOL_KEY), id); } catch (e) { /* ignore */ }
     schoolDesc.textContent = p.desc;
     updateDelSchoolBtn();
     if (opts.silent) return true;
@@ -163,7 +260,8 @@
       list.push({
         id: 'custom-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         name: name,
-        desc: '自定义学校：以「' + pendingCustomDoc.name + '」为要求依据（' +
+        mode: currentMode,   // 学科标签：工科建的自定义学校只出现在工科下拉
+        desc: '自定义学校（' + MODES[currentMode].label + '）：以「' + pendingCustomDoc.name + '」为要求依据（' +
           new Date().toLocaleDateString('zh-CN') + ' 添加）',
         custom: true,
         doc: pendingCustomDoc.dataUrl,
@@ -181,13 +279,13 @@
       S.addSchoolModal.hidden = true;
     });
 
-    // 删除自定义预设
+    // 删除自定义预设（删除后恢复为当前学科的内置默认预设）
     S.btnDelSchool.addEventListener('click', () => {
       const p = presetById(schoolSel.value);
       if (!p || !p.custom) return;
       saveCustomPresets(customPresets().filter((x) => x.id !== p.id));
       buildSchoolOptions();
-      applyPreset(PRESETS.length ? PRESETS[0].id : null, { silent: true });
+      applyPreset(defaultPresetId(), { silent: true });
       toast('已删除「' + p.name + '」预设');
     });
   }
@@ -427,7 +525,8 @@
     S.btnPreviewReformat.addEventListener('click', () => { if (lastFile) formatFile(lastFile); });
     S.btnDownload.addEventListener('click', download);
     S.btnReset.addEventListener('click', () => {
-      const def = PRESETS[0];
+      const defId = defaultPresetId();
+      const def = defId && presetById(defId);
       if (def) {
         applyPreset(def.id, { silent: true });
         toast('已恢复为「' + def.name + '」默认格式要求');
@@ -443,11 +542,15 @@
     });
   }
 
-  /* ---------- 启动 ---------- */
-  buildSchoolOptions();
-  loadSettings();
+  /* ---------- 启动 ----------
+   * 每次进入先迁移旧版数据（并入工科空间），再显示学科选择页；
+   * 选择后 enterMode 才加载该学科的设置与学校记忆 */
+  migrateLegacy();
   bind();
   bindAddSchool();
+  bindGate();
+  updateModeBadge();
+  showGate();
   if (typeof FormatTool === 'undefined') {
     toast('核心引擎加载失败，请检查 js/formatter.js 是否存在', true);
   }

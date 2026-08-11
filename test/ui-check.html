@@ -65,6 +65,16 @@ setInterval(function () {
     var fb = w.document.getElementById('filebar');
     if (!ov || !fb) return;
 
+    // 学科选择页：先点「工科论文」进入工具
+    var gate = w.document.getElementById('modeGate');
+    var gateOptions = w.document.getElementById('gateOptions');
+    if (gate && !gate.hidden && gateOptions) {
+      for (var g = 0; g < gateOptions.children.length; g++) {
+        if (gateOptions.children[g].dataset.mode === 'gongke') { gateOptions.children[g].click(); break; }
+      }
+      return; // 本 tick 只做进入操作，下个 tick 继续
+    }
+
     var vis = checkVisible(w, ov);
     if (vis !== lastOverlayVisible) { timeline.push({ t: Math.round(performance.now() / 100) / 10 + 's', visible: vis }); lastOverlayVisible = vis; }
 

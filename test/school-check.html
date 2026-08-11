@@ -5,17 +5,17 @@
   <title>school-check</title>
 </head>
 <body>
-<!-- UI 冒烟测试（v1.3）：
-     1. 学校要求下拉存在、默认选中「重庆工程学院（附件8）」、lineSpacing=exact:20
-     2. 切换到「通用本科规范」→ lineSpacing=multiple:1.5、marginTop=3；切回 → exact:20
-     3. 上传要求文档 → modal 出现 → 命名「测试大学」保存 → 下拉出现该校且自动切换、设置被应用
-     4. 切回内置再切回「测试大学」→ 该校设置恢复（marginTop=3.3）
+<!-- UI 冒烟测试（v1.4，工科模式内）：
+     1. 清空 storage → 学科选择页出现 → 点「工科论文」进入
+     2. 工科下拉=[重庆工程学院（附件8）]、lineSpacing=exact:20
+     3. 上传要求文档 → modal 出现 → 命名「测试大学」保存 → 下拉出现该校且自动切换、设置被应用（marginTop=3.3）
+     4. 切回内置再切回「测试大学」→ 该校设置恢复
      5. 删除「测试大学」→ 下拉只剩内置、删除按钮隐藏 -->
 <iframe id="app" src="/论文格式助手/index.html" width="1200" height="900" style="border:0"></iframe>
 <script src="../libs/jszip.min.js"></script>
 <script>
 var done = false, finalTitle = '', steps = [];
-var phase = 0; // 0=默认值 1=等modal 2=等保存完成 3=切换往返+删除 4=验证删除
+var phase = 0; // 0=清理+reload 99=等gate并进工科 1=默认值 2=等modal 3=等保存完成 4=切换往返+删除 5=验证删除
 var lastOverlayVisible = null;
 var app = null;
 
@@ -64,7 +64,9 @@ setInterval(function () {
     var delBtn = win.document.getElementById('btnDelSchool');
     var modal = win.document.getElementById('addSchoolModal');
     var nameInput = win.document.getElementById('schoolNameInput');
-    if (!ov || !sel || !delBtn || !modal || !nameInput) return;
+    var gate = win.document.getElementById('modeGate');
+    var gateOptions = win.document.getElementById('gateOptions');
+    if (!ov || !sel || !delBtn || !modal || !nameInput || !gate || !gateOptions) return;
     document.title = 'DBG:phase=' + phase;
 
     var vis = checkVisible(win, ov);
@@ -75,51 +77,61 @@ setInterval(function () {
     var optTexts = function () { var o = []; for (var i = 0; i < sel.options.length; i++) o.push(sel.options[i].text); return o; };
     var selCustom = function () { return /^custom-/.test(sel.value) && sel.options[sel.selectedIndex].text === '测试大学'; };
 
-    /* 阶段0：默认值 + 内置切换 */
-    if (phase === 0 && ready && sel.options.length >= 2) {
-      if (!(sel.value === 'cqgc' && ls() === 'exact:20')) return fail('默认下拉值不对: ' + sel.value + '/' + ls());
-      sel.value = 'generic';
-      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
-      var ok2 = ls() === 'multiple:1.5' && mt() === '3';
-      steps.push('切换通用预设: ' + ok2);
-      if (!ok2) return fail('切换通用预设未生效');
-      sel.value = 'cqgc';
-      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
-      var ok3 = ls() === 'exact:20';
-      steps.push('切回重庆工程学院: ' + ok3);
-      if (!ok3) return fail('切回未生效');
+    /* 阶段0：清空 storage → 重新加载（保证隔离测试从全新状态开始） */
+    if (phase === 0) {
+      try { win.localStorage.clear(); } catch (e) {}
+      win.location.reload();
+      phase = 99;
+      return;
+    }
 
-      // 为自定义学校调整一个字段（marginTop=3.3）后上传要求文档
+    /* 阶段99：等选择页出现 → 点「工科论文」进入工科模式 */
+    if (phase === 99) {
+      if (!gate.hidden && gateOptions.children.length === 2) {
+        for (var g = 0; g < gateOptions.children.length; g++) {
+          if (gateOptions.children[g].dataset.mode === 'gongke') gateOptions.children[g].click();
+        }
+        phase = 1;
+      }
+      return;
+    }
+
+    /* 阶段1：工科默认值（下拉只有内置 cqgc）+ 为自定义学校调整 marginTop=3.3 后上传 */
+    if (phase === 1 && ready) {
+      if (sel.options.length !== 1 || sel.value !== 'cqgc' || ls() !== 'exact:20' || mt() !== '2.5') {
+        return fail('工科默认下拉值不对: ' + optTexts().join('|') + ' value=' + sel.value + ' ls=' + ls() + ' mt=' + mt());
+      }
+      steps.push('工科默认: ' + optTexts().join('|') + ' ls=' + ls());
       var mtEl = win.document.getElementById('marginTop');
       mtEl.value = '3.3';
       mtEl.dispatchEvent(new win.Event('change', { bubbles: true }));
       uploadDocxTo(win, 'fileSchool', '测试大学格式要求.docx');
-      phase = 1;
-      return;
-    }
-
-    /* 阶段1：等 modal 出现 → 命名 → 保存 */
-    if (phase === 1) {
-      if (modal.hidden) return; // 等读取文档完成弹出 modal
-      nameInput.value = '测试大学';
-      win.document.getElementById('btnAddSchoolConfirm').click();
       phase = 2;
       return;
     }
 
-    /* 阶段2：等保存完成（下拉出现「测试大学」且选中、设置恢复 3.3、删除按钮可见） */
-    if (phase === 2 && ready) {
+    /* 阶段2：等 modal 出现 → 命名 → 保存 */
+    if (phase === 2) {
+      if (modal.hidden) return; // 等读取文档完成弹出 modal
+      nameInput.value = '测试大学';
+      win.document.getElementById('btnAddSchoolConfirm').click();
+      phase = 3;
+      return;
+    }
+
+    /* 阶段3：等保存完成（下拉出现「测试大学」且选中、设置恢复 3.3、删除按钮可见） */
+    if (phase === 3 && ready) {
       if (modal.hidden && selCustom() && mt() === '3.3' && !delBtn.hidden) {
         steps.push('添加学校: 选项=' + optTexts().join('|') + ' 选中=' + sel.options[sel.selectedIndex].text + ' marginTop=' + mt() + ' 删除按钮可见');
-        phase = 3;
+        phase = 4;
         return;
       }
       if (!modal.hidden) return; // 保存还在进行或失败重试
       return fail('添加学校预设未生效: options=' + optTexts().join('|') + ' value=' + sel.value + ' mt=' + mt() + ' delHidden=' + delBtn.hidden);
     }
 
-    /* 阶段3：切回内置 → 再切回自定义 → 删除自定义 */
-    if (phase === 3 && ready) {
+    /* 阶段4：切回内置 → 再切回自定义 → 删除自定义 */
+    if (phase === 4 && ready) {
       sel.value = 'cqgc';
       sel.dispatchEvent(new win.Event('change', { bubbles: true }));
       var backBuiltin = mt() === '2.5';
@@ -131,13 +143,13 @@ setInterval(function () {
       steps.push('切换往返: 内置marginTop=' + mt() + ' 恢复自定义=' + backCustom);
       if (!backBuiltin || !backCustom) return fail('切换往返失败');
       delBtn.click();
-      phase = 4;
+      phase = 5;
       return;
     }
 
-    /* 阶段4：验证删除结果 */
-    if (phase === 4 && ready) {
-      var okDel = optTexts().length === 2 && delBtn.hidden && mt() === '2.5';
+    /* 阶段5：验证删除结果 */
+    if (phase === 5 && ready) {
+      var okDel = optTexts().length === 1 && optTexts()[0] === '重庆工程学院（附件8）' && delBtn.hidden && mt() === '2.5';
       steps.push('删除后: 选项=' + optTexts().join('|') + ' 删除按钮隐藏=' + delBtn.hidden + ' marginTop=' + mt() + ' → ' + okDel);
       if (!okDel) return fail('删除自定义学校失败');
       finalTitle = 'SCHOOL_CHECK:' + JSON.stringify({ ok: true, steps: steps });
