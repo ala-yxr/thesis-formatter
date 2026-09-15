@@ -19,6 +19,7 @@
         </svg>
       </span>
       <span class="brand-name">论文格式助手</span>
+      <span class="brand-ver" id="brandVer" title="工具版本号，也是导出文件名里的版本后缀">v—</span>
     </div>
     <div class="brand-tag">
       <button class="mode-badge" id="btnSwitchMode" type="button" title="点击切换工科/文科论文">
@@ -199,7 +200,42 @@
             <label>分节页码（前置罗马数字 / 主体阿拉伯数字）</label>
             <input type="checkbox" id="pageNumberSplit" checked>
           </div>
-          <p class="settings-sub" style="margin-top:8px">表格：清除内部所有线，仅保留顶线/底线两根 1.5 磅线；换页：每章另起一页；页码：摘要/目录用 Ⅰ Ⅱ Ⅲ，正文从绪论起用 1 2 3。</p>
+          <div class="row row-check">
+            <label>页眉显示章名（一级标题，域自动更新）</label>
+            <input type="checkbox" id="bodyHeader" checked>
+          </div>
+          <div class="row row-check">
+            <label>打开文档时自动更新目录页码</label>
+            <input type="checkbox" id="updateFields" checked>
+          </div>
+          <div class="row row-check">
+            <label>引用标注 [1] 改为上标</label>
+            <input type="checkbox" id="citeSuperscript" checked>
+          </div>
+          <p class="settings-sub" style="margin-top:8px">表格：清除内部所有线（含每行自带的行级边框），仅保留顶线/底线两根 1.5 磅线；换页：每章另起一页；页码：摘要/目录用 Ⅰ Ⅱ Ⅲ，正文从绪论起用 1 2 3；页眉：正文起各页页眉自动显示所在章节标题，封面/摘要/目录的页眉保持原样；上标：正文中的 [1][2] 等引用标注改为右上角上标，参考文献表本身的序号不变。</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>内容清理与题注</summary>
+        <div class="group">
+          <div class="row row-check">
+            <label>清除「突出显示」底色</label>
+            <input type="checkbox" id="clearHighlight" checked>
+          </div>
+          <div class="row row-check">
+            <label>删除中文与英文/数字之间的空格</label>
+            <input type="checkbox" id="cjkSpace" checked>
+          </div>
+          <div class="row row-check">
+            <label>图表改用 Word 真题注（题注样式 + SEQ 自动编号）</label>
+            <input type="checkbox" id="wordCaption" checked>
+          </div>
+          <div class="row row-check">
+            <label>每章末尾补分节符（下一页）</label>
+            <input type="checkbox" id="chapterSection" checked>
+          </div>
+          <p class="settings-sub" style="margin-top:8px">清除底色：删掉全文的「突出显示」标记（写作时标英文术语的灰底），字符底纹不动；删空格：正文和表格里中文与英文/数字之间的空格一律删除，但标题、目录、题注里「编号 + 文字」的那个空格按附件8 保留（1 绪论、图4.1 系统图）；真题注：图片题注改为「题注」样式 + SEQ 域自动编号（图4.1、表3.1），表题置于表格上方、图题置于图片下方，正文里「如图4-1所示」这类引用同步改号；分节符：每章末尾补一条「分节符（下一页）」，已有则跳过，便于逐章单独设页眉。</p>
         </div>
       </details>
 
@@ -233,6 +269,11 @@
               <option value="left">左对齐</option>
             </select>
           </div>
+          <div class="row row-check">
+            <label>一级标题改「1 绪论」体例</label>
+            <input type="checkbox" id="chapterNumber" checked>
+            <em class="hint">「第1章 绪论」→「1 绪论」，正文里的「第N章」指代不动</em>
+          </div>
           <div class="row">
             <label>二级标题字号</label>
             <select id="h2Size">
@@ -249,7 +290,7 @@
               <option value="10.5">五号 (10.5pt)</option>
             </select>
           </div>
-          <p class="settings-sub" style="margin-top:8px">按附件8：一级三号黑体居中、二级小三号黑体居左、三级四号黑体居左并右缩进两个字。</p>
+          <p class="settings-sub" style="margin-top:8px">按附件8：一级三号黑体居中、二级小三号黑体居左、三级四号黑体居左并右缩进两个字。章号体例：一级标题写「1 绪论」（数字与文字间隔一字符），不写「第1章 绪论」；正文里指代章节的「第5章」原样保留；附录只有一个时不编序号（「附录 原理图」），多个依序编 A、B、C（「附录A 部署步骤」），附录里的图题随之改成「图A1」。</p>
           <div class="row row-check">
             <label>标题加粗</label>
             <input type="checkbox" id="headingBold">
@@ -391,12 +432,12 @@
         <li><b>学校要求：</b>设置面板顶部的下拉框只显示当前学科下的学校格式预设（工科如重庆工程学院《附件8》），选择后自动切换全部格式要求；点击「＋ 添加学校要求」可上传该校的要求文档，保存当前格式设置为该校预设（下次直接切换，且只出现在当前学科的下拉中），也可删除自定义预设。</li>
         <li><b>格式依据：</b>重庆工程学院预设按《附件8 本科毕业设计（论文）撰写格式要求》：页边距 2.5cm、行距固定 20 磅、一级三号黑体居中、二级小三号黑体居左、三级四号黑体居左右缩两字、图题表题五号宋体、参考文献五号宋体序号左顶格、三线表、一级标题换页、前置罗马数字页码等。</li>
         <li><b>封面保留：</b>「摘要」之前的页面（封面、声明、任务书等）保持原样不动，避免破坏学校模板。</li>
-        <li><b>目录：</b>自动识别目录页（「目录/目次」标题、Word 目录样式 TOC、超链接条目、点线页码等特征），条目按小四宋体、2-4 级、下级右缩两字重排；如需更新页码，请在 Word 中右键目录 →「更新域」。</li>
+        <li><b>目录：</b>自动识别目录页（「目录/目次」标题、Word 目录样式 TOC、超链接条目、点线页码等特征），条目按小四宋体、2-4 级、下级右缩两字重排；生成的是 Word 自动目录域，打开文档时会自动更新页码（Word 可能提示「是否更新域」，选「是」）。若想手动刷新：右键目录 →「更新域」→「更新整个目录」。</li>
         <li><b>公式：</b>公式原样保留（不会改动字号），预览中可能显示不完整，以 Word 为准。</li>
-        <li><b>表格：</b>默认清除表格内部所有线，仅保留顶线/底线两根 1.5 磅线（可关闭）；图片全部原样保留。</li>
+        <li><b>表格：</b>默认按三线表处理——清除表级边框与每行自带的行级边框（w:tblPrEx），保留顶线/底线两根 1.5 磅线，表头行加 0.75 磅栏目线，并让每行不跨页断裂（可关闭）；图片全部原样保留。</li>
         <li><b>图片：</b>所有含图片的段落自动改为单倍行距，避免固定行距把图片截断显示不全。</li>
         <li><b>页码：</b>若原文档已有页码则保留数字样式；封面（首页）不显示页码；分节页码功能让摘要/目录用罗马数字、正文从绪论起用阿拉伯数字从 1 重新编号（与附件8一致，可关闭）。</li>
-        <li><b>页眉：</b>页眉文字（校名 + 章名）涉及动态章节名，需在 Word 中按学校要求手动设置；页眉/页脚距离已按 1.6cm / 2.1cm 设置。</li>
+        <li><b>页眉：</b>正文起各分节的页眉自动改为「当前页所在章的一级标题」（五号宋体居中 + 下划线，用 Word 的 STYLEREF 域实现，改章名后页眉自动跟随）；封面、摘要、目录等前置部分的页眉保持原样不动。页眉/页脚距离已按 1.6cm / 2.1cm 设置。</li>
         <li><b>结构识别：</b>按「摘要 → 关键词 → Abstract → Keywords → 目录 → 章节 → 参考文献 → 致谢/附录」自动识别，个别特殊版式可能需要手工微调。</li>
       </ul>
     </details>
@@ -404,7 +445,7 @@
 </main>
 
 <footer class="footer">
-  <p>论文格式助手 v1.4 — 工科/文科模式分离（格式互不影响）/ 多学校格式预设切换（支持上传要求文档添加学校）/ 目录识别重排 / 图片段落单倍行距 / 表格仅保留顶底线 1.5 磅</p>
+  <p>论文格式助手 v1.6.5 — 工科/文科模式分离（格式互不影响）/ 多学校格式预设切换（支持上传要求文档添加学校）/ 目录识别重排并自动更新页码 / 页眉自动显示章名 / 一级标题「1 绪论」体例（附录与图A1）/ 图片段落单倍行距 / 表格仅保留顶底线 1.5 磅（含清除行级边框）/ 图表 Word 真题注（SEQ 自动编号）/ 每章补分节符 / 清除突出显示 / 删除中西文空格<br><span class="settings-sub">若页面表现与说明不符，请按 Ctrl+F5 强制刷新（浏览器可能缓存了旧版脚本），并确认页面左上角版本号是最新的。</span></p>
 </footer>
 
 <div class="toast" id="toast" hidden></div>
@@ -431,8 +472,8 @@
 
 <script src="libs/jszip.min.js"></script>
 <script src="libs/mammoth.browser.min.js"></script>
-<script src="js/presets.js?v=17"></script>
-<script src="js/formatter.js?v=17"></script>
-<script src="js/app.js?v=17"></script>
+<script src="js/presets.js?v=25"></script>
+<script src="js/formatter.js?v=25"></script>
+<script src="js/app.js?v=25"></script>
 </body>
 </html>

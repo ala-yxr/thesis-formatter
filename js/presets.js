@@ -22,7 +22,7 @@
       id: 'cqgc',
       mode: 'gongke',
       name: '重庆工程学院（附件8）',
-      desc: '页边距 2.5cm / 行距固定 20 磅 / 宋体小四 + Times New Roman / 一级三号黑体居中、二级小三、三级四号右缩两字 / 图题表题五号宋体 / 表格仅保留顶底线 1.5 磅 / 目录小四宋体 2-4 级右缩两字 / 一级标题换页 / 分节页码（前置罗马、主体阿拉伯从 1 起）',
+      desc: '页边距 2.5cm / 行距固定 20 磅 / 宋体小四 + Times New Roman / 一级三号黑体居中、二级小三、三级四号右缩两字 / 一级标题「1 绪论」体例 / 图题表题五号宋体 / 三线表（顶底线 1.5 磅 + 栏目线 0.75 磅）/ 目录小四宋体 2-4 级右缩两字并自动更新页码 / 页眉自动显示章名 / 一级标题换页 / 分节页码（前置罗马、主体阿拉伯从 1 起）',
       settings: {
         marginTop: 2.5, marginBottom: 2.5, marginLeft: 2.5, marginRight: 2.5,
         bodyFont: '宋体', latinFont: 'Times New Roman', bodySize: 12,
@@ -34,7 +34,10 @@
         refSize: 10.5, refHangingChars: 0,
         captionFont: '宋体', captionSize: 10.5,
         pageNumber: 'center', pageNumberSplit: true,
-        threeLineTable: true, chapterPageBreak: true, autoToc: true
+        threeLineTable: true, chapterPageBreak: true, autoToc: true,
+        bodyHeader: true, updateFields: true, citeSuperscript: true,
+        clearHighlight: true, cjkSpace: true, wordCaption: true, chapterSection: true,
+        chapterNumber: true
       }
     },
     {
@@ -53,7 +56,10 @@
         refSize: 10.5, refHangingChars: 0,
         captionFont: '宋体', captionSize: 10.5,
         pageNumber: 'center', pageNumberSplit: false,
-        threeLineTable: true, chapterPageBreak: true, autoToc: true
+        threeLineTable: true, chapterPageBreak: true, autoToc: true,
+        bodyHeader: false, updateFields: true, citeSuperscript: true,
+        clearHighlight: true, cjkSpace: true, wordCaption: true, chapterSection: true,
+        chapterNumber: false   // 文科：一级标题用汉字序号（「一 员工绩效考核…」），章号体例不改
       }
     }
   ];

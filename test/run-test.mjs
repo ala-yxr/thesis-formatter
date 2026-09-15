@@ -460,7 +460,7 @@ for (let i = 0; i < bodyKids11.length; i++) {
   const e = bodyKids11[i];
   if (e.localName !== 'p') continue;
   const t = Array.from(e.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('').trim();
-  if (!/^(图|表)\s*\d/.test(t)) continue;
+  if (!/^(图|表)\s*[A-Z]?\d/.test(t)) continue;   // 正文「图4.1」+ 附录「图A1」
   if (isFront(e)) continue;
   capTotal++;
   const r0 = directChildren(e, 'r')[0];
@@ -547,10 +547,16 @@ const brChild = (e, n) => { if (!e || !e.childNodes) return null; return Array.f
 const brPBB = (e) => { const pPr = e.localName === 'p' && brChild(e, 'pPr'); return !!(pPr && pPr.getElementsByTagNameNS(W_NS, 'pageBreakBefore').length); };
 const h1a = brEls.findIndex(e => e.localName === 'p' && brTxt(e) === '1 绪  论');
 const h1b = brEls.findIndex(e => e.localName === 'p' && brTxt(e) === '2 系统方案设计');
-const aPrev = h1a > 0 ? brEls[h1a - 1] : null;                       // 第一章前的空段（应有 PBB）
+const aPrev = h1a > 0 ? brEls[h1a - 1] : null;                       // 第一章前的空段（分节符已接手换页 → 无 PBB）
 const aNext = h1a >= 0 && h1a < brEls.length - 1 ? brEls[h1a + 1] : null; // 标题下方空段（210 五号）
 const aNextSp = aNext && aNext.localName === 'p' ? brChild(brChild(aNext, 'pPr') || {}, 'spacing') : null;
-const aPrevOk = !!aPrev && aPrev.localName === 'p' && !brTxt(aPrev) && brPBB(aPrev) &&
+/* 第一章前的换页由「分节符（下一页）」承担（chapterSection 新行为），
+   所以空段上不应再有 pageBreakBefore——两者叠加会多出一张空白页。 */
+const aSectEl = h1a > 1 ? brEls[h1a - 2] : null;
+const aSect = aSectEl && aSectEl.localName === 'p' ? brChild(brChild(aSectEl, 'pPr') || {}, 'sectPr') : null;
+const aType = aSect && brChild(aSect, 'type');
+const aPrevOk = !!aSect && (!aType || aType.getAttributeNS(W_NS, 'val') === 'nextPage') &&
+  !!aPrev && aPrev.localName === 'p' && !brTxt(aPrev) && !brPBB(aPrev) &&
   !!aNext && aNext.localName === 'p' && !brTxt(aNext) &&
   !!aNextSp && aNextSp.getAttributeNS(W_NS, 'line') === '210';   // 标题下方五号空段（与上方对称）
 const bPrev1 = h1b > 0 ? brEls[h1b - 1] : null;                      // 第二章前的空段（无 PBB）
@@ -564,7 +570,7 @@ const bPrevOk = !!bPrev1 && bPrev1.localName === 'p' && !brTxt(bPrev1) && !brPBB
   !!bSectSp && bSectSp.getAttributeNS(W_NS, 'line') === '20' &&   // 空分节段 1pt 行高（章节页只留一个回车）
   !!bPrev1Sp && bPrev1Sp.getAttributeNS(W_NS, 'line') === '210';  // 标题上方空段五号字行高
 const titleNoPBB = !brPBB(brEls[h1a]) && !brPBB(brEls[h1b]);
-console.log(`✓ 章节换页单测: 无分节时空段分页=${aPrevOk} | 连续分节改nextPage+空段规整=${bPrevOk} | 标题无重复分页=${titleNoPBB}`);
+console.log(`✓ 章节换页单测: 第一章前补 nextPage 分节符=${aPrevOk} | 连续分节改nextPage+空段规整=${bPrevOk} | 标题无重复分页=${titleNoPBB}`);
 if (!aPrevOk || !bPrevOk || !titleNoPBB) throw new Error('章节换页规整化不符合要求');
 
 // 15. 表格与图片紧邻自动空一行（单测：构造 tbl+img 与 img+tbl 相邻的文档，验证被分隔）
@@ -599,8 +605,27 @@ for (let i = 0; i < tiEls.length - 1; i++) {
   if ((a.localName === 'tbl' && isImgEl(b)) || (isImgEl(a) && b.localName === 'tbl')) tiAdj++;
   if ((a.localName === 'tbl' && isEmptyP(b) && isImgEl(c)) || (isImgEl(a) && isEmptyP(b) && c.localName === 'tbl')) tiSep++;
 }
-console.log(`✓ 表格/图片分隔单测: 分隔空行 ${tiSep} 处 | 残留紧邻 ${tiAdj} 处`);
-if (tiSep !== 2 || tiAdj !== 0) throw new Error('表格与图片未自动空一行分隔');
+/* 改用真题注后，表格/图片之间多半已经被题注段隔开，空行计数不再是固定的 2。
+   真正要守的性质是：①表格与图片不直接相邻 ②题注紧贴各自的对象
+   （表题在表格正上方、图题在图片正下方），顺带保证编号连续无跳号。 */
+const tiTxt = (e) => Array.from(e.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('');
+let tiTbl = 0, tiImg = 0, tiCapOk = 0;
+for (let i = 0; i < tiEls.length; i++) {
+  const e = tiEls[i];
+  if (e.localName === 'tbl') {
+    tiTbl++;
+    const p = tiEls[i - 1];
+    if (p && p.localName === 'p' && /^表/.test(tiTxt(p))) tiCapOk++;
+  }
+  if (isImgEl(e)) {
+    tiImg++;
+    const n = tiEls[i + 1];
+    if (n && n.localName === 'p' && /^图/.test(tiTxt(n))) tiCapOk++;
+  }
+}
+console.log(`✓ 表格/图片分隔单测: 残留紧邻 ${tiAdj} 处 | 题注紧贴对象 ${tiCapOk}/${tiTbl + tiImg}` +
+  ` | 表号连续=${tiEls.filter(e => e.localName === 'p' && /^表/.test(tiTxt(e))).map(e => tiTxt(e)).join(',')}`);
+if (tiAdj !== 0 || tiCapOk !== tiTbl + tiImg) throw new Error('表格与图片未正确分隔/题注未紧贴');
 
 // 16. 前置部分（前两页）保护：摘要之前的封面/声明不进行任何修改操作
 //     （封面表格边框保留、封面图片行距保留、封面分节边距保留；正文正常格式化）
@@ -729,5 +754,131 @@ const tocHasEntries = tocEntryParas.length >= 2 && tocEntryTxt.some(t => t.inclu
 const tocFieldOk = !!tocSdt && /TOC/.test(tocInstr) && tocDirty && tocHasEntries;
 console.log(`✓ 自动目录域: sdt=${!!tocSdt} | 指令=${tocInstr.trim().slice(0, 22)} | 自动更新=${tocDirty} | 预填充条目=${tocEntryParas.length} 条`);
 if (!tocFieldOk) throw new Error('目录未替换为自动目录域（sdt + TOC + dirty + 预填充条目）');
+
+// 20. 章标题体例改写：「第1章 绪论」/「第二章 …」→「1 绪论」/「2 …」（数字与文字间隔一字符），
+//     正文里指代章节的「第2章」原样保留；附录只一个时不编序号（「附录 原理图」），
+//     多于一个依序编 A、B；附录里的图题改成「图A1」（字母与序号之间没有「.」），正文仍是「图1.1」
+function buildH1TestDocx(multiApp) {
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const P = (t) => `<w:p><w:r><w:t>${esc(t)}</w:t></w:r></w:p>`;
+  const imgP = '<w:p><w:r><w:drawing><w:inline/></w:drawing></w:r></w:p>';
+  const body = P('摘  要') + P('本文研究转台控制精度问题。') + P('关键词：转台；控制') +
+    P('第1章 绪论') + P('本文将在第2章给出总体设计方案。') + imgP + P('图1.1 系统框图') +
+    P('第二章 系统总体设计') + P('系统分为三个模块实现。') +
+    P('参考文献') + P('[1] 孙家广.计算机图形学[M].北京:清华大学出版社,1995:15-18.') +
+    P('附录1 原理图') + imgP + P('图1.2 电路原理图') +
+    (multiApp ? P('附录2 部署步骤') + imgP + P('图1.3 部署流程图') : '');
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="' + W + '"><w:body>' + body +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'nodebuffer' });
+}
+async function h1TextsOf(buf) {
+  const z = await JSZip.loadAsync(buf);
+  const d = new DOMParser().parseFromString(await z.file('word/document.xml').async('string'), 'application/xml');
+  const b = d.getElementsByTagNameNS(W_NS, 'body')[0];
+  return Array.from(b.childNodes).filter(n => n.nodeType === 1 && n.localName === 'p')
+    .map(p => Array.from(p.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('').trim());
+}
+const h1Single = await h1TextsOf((await FormatTool.formatDocx(await buildH1TestDocx(false), FormatTool.DEFAULTS, { format: 'nodebuffer' })).data);
+const h1Multi = await h1TextsOf((await FormatTool.formatDocx(await buildH1TestDocx(true), FormatTool.DEFAULTS, { format: 'nodebuffer' })).data);
+const has = (arr, s) => arr.includes(s);
+const oneAppOk = has(h1Single, '1 绪论') && has(h1Single, '2 系统总体设计') &&
+  has(h1Single, '附录 原理图') && has(h1Single, '图A1 电路原理图') &&
+  has(h1Single, '图1.1 系统框图') &&                       // 正文图仍带「.」
+  has(h1Single, '本文将在第2章给出总体设计方案。') &&        // 正文里的指代不动
+  !h1Single.some(t => /^第[一二三四五六七八九十0-9]+章/.test(t));
+const multiAppOk = has(h1Multi, '附录A 原理图') && has(h1Multi, '附录B 部署步骤') &&
+  has(h1Multi, '图A1 电路原理图') && has(h1Multi, '图B1 部署流程图') &&
+  !has(h1Multi, '附录 原理图');
+console.log(`✓ 章标题体例单测: 单个附录=${oneAppOk} | 多个附录编 A/B=${multiAppOk}`);
+console.log(`  单附录标题: ${h1Single.filter(t => /^(第|[0-9]+ |附)/.test(t)).join(' | ')}`);
+console.log(`  多附录标题: ${h1Multi.filter(t => /^(第|[0-9]+ |附)/.test(t)).join(' | ')}`);
+if (!oneAppOk || !multiAppOk) throw new Error('章标题体例改写不符合附件8（第N章 → N、附录序号、图A1）');
+
+// 21. 导出文件名：原名 + 工具版本号（不再缀「_格式化」）；已带版本号或浏览器重名副本
+//     后缀的先去掉再拼，反复跑不会越拼越长；作者自己的版本号（CYX_3.0）不能被吃掉
+const V = '_v' + FormatTool.VERSION + '.docx';
+const nameCases = [
+  ['CYX_毕业设计.docx', 'CYX_毕业设计' + V],
+  ['1.docx', '1' + V],
+  ['CYX_毕业设计.DOCX', 'CYX_毕业设计' + V],
+  ['CYX_毕业设计_v1.6.2.docx', 'CYX_毕业设计' + V],        // 旧版本后缀 → 换成本版
+  ['CYX_毕业设计_v1.6.2 (1).docx', 'CYX_毕业设计' + V],    // 浏览器重名副本的「 (1)」
+  ['CYX_毕业设计-v1.6.2.docx', 'CYX_毕业设计' + V],        // 连字符写法也认
+  ['CYX_3.0.docx', 'CYX_3.0' + V],                          // 作者自己的版本号不动
+  ['论文-终稿.docx', '论文-终稿' + V],
+];
+const nameBad = nameCases.filter(([i, o]) => FormatTool.outputName(i) !== o);
+console.log(`✓ 导出文件名: ${nameCases.length - nameBad.length}/${nameCases.length} 例正确（例：CYX_毕业设计.docx → ${FormatTool.outputName('CYX_毕业设计.docx')}）`);
+nameBad.forEach(([i, o]) => console.error(`  ✗ ${i} → ${FormatTool.outputName(i)}（预期 ${o}）`));
+if (nameBad.length) throw new Error('导出文件名规则不正确');
+
+// 22. 域字符（w:fldChar）必须配平 —— 这是「输出文档正文内容全部消失」的根因守卫
+//     域字符不配平（典型：只剩一个没有 begin 的 end）时，Word 打开文档更新域会把
+//     其后的内容当成域的一部分处理，正文就整片不见了。v1.6.3 及以前把已格式化过的
+//     文档再格式化一遍时，旧目录只删掉前半截，正文里就留下这样的孤儿 end
+function fieldStatsOf(xml) {
+  const d = new DOMParser().parseFromString(xml, 'application/xml');
+  const fc = d.getElementsByTagNameNS(W_NS, 'fldChar');
+  let begin = 0, end = 0, depth = 0, min = 0;
+  for (let i = 0; i < fc.length; i++) {
+    const t = fc[i].getAttributeNS(W_NS, 'fldCharType');
+    if (t === 'begin') { begin++; depth++; }
+    else if (t === 'end') { end++; depth--; }
+    if (depth < min) min = depth;
+  }
+  return { begin, end, depth, min };
+}
+async function docStats(buf) {
+  const z = await JSZip.loadAsync(buf);
+  const xml = await z.file('word/document.xml').async('string');
+  const d = new DOMParser().parseFromString(xml, 'application/xml');
+  const ps = d.getElementsByTagNameNS(W_NS, 'p');
+  let chars = 0, paras = 0;
+  for (let i = 0; i < ps.length; i++) {
+    const t = (ps[i].textContent || '').replace(/\s+/g, '');
+    if (t) { paras++; chars += t.length; }
+  }
+  return Object.assign(fieldStatsOf(xml), { chars, paras });
+}
+const balanced = (s) => s.begin === s.end && s.depth === 0 && s.min === 0;
+
+const pass1 = await docStats(result.data);
+const again = await FormatTool.formatDocx(result.data, FormatTool.DEFAULTS, { format: 'nodebuffer' });
+const pass2 = await docStats(again.data);
+const idemOk = pass1.paras === pass2.paras && Math.abs(pass1.chars - pass2.chars) <= pass1.chars * 0.02;
+console.log(`✓ 域字符配平: 一遍 begin=${pass1.begin}/end=${pass1.end} 收尾深度=${pass1.depth} | ` +
+  `二遍 begin=${pass2.begin}/end=${pass2.end} 收尾深度=${pass2.depth}`);
+console.log(`✓ 反复格式化稳定: 一遍 ${pass1.chars}字/${pass1.paras}段 → 二遍 ${pass2.chars}字/${pass2.paras}段`);
+if (!balanced(pass1) || !balanced(pass2) || !idemOk) {
+  throw new Error(`域字符不配平或反复格式化结果不稳定（一遍 ${pass1.chars}字/${pass1.paras}段，二遍 ${pass2.chars}字/${pass2.paras}段）`);
+}
+
+// 输入文档自带孤儿域字符（旧目录只剩下一个 end）时，输出必须被修好
+const orphanXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+  '<w:document xmlns:w="' + W_NS + '"><w:body>' +
+  '<w:p><w:r><w:t>摘  要</w:t></w:r></w:p><w:p><w:r><w:t>本文研究转台控制精度问题。</w:t></w:r></w:p>' +
+  '<w:p><w:r><w:t>关键词：转台；控制</w:t></w:r></w:p>' +
+  '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +          // 孤儿 end
+  '<w:p><w:r><w:t>第1章 绪论</w:t></w:r></w:p><w:p><w:r><w:t>绪论正文内容。</w:t></w:r></w:p>' +
+  '<w:p><w:r><w:t>参考文献</w:t></w:r></w:p>' +
+  '<w:p><w:r><w:t>[1] 孙家广.计算机图形学[M].北京:清华大学出版社,1995:15-18.</w:t></w:r></w:p>' +
+  '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+  '</w:body></w:document>';
+const orphanDocx = await JSZip().file('word/document.xml', orphanXml)
+  .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+  .generateAsync({ type: 'nodebuffer' });
+const orphanOut = await FormatTool.formatDocx(orphanDocx, FormatTool.DEFAULTS, { format: 'nodebuffer' });
+const orphanStats = fieldStatsOf(await (await JSZip.loadAsync(orphanOut.data)).file('word/document.xml').async('string'));
+console.log(`✓ 孤儿域字符修复: 输入含无 begin 的 end → 输出 begin=${orphanStats.begin}/end=${orphanStats.end} ` +
+  `收尾深度=${orphanStats.depth}（fieldsFixed=${orphanOut.counts.fieldsFixed}）`);
+if (!balanced(orphanStats) || orphanOut.counts.fieldsFixed < 1) {
+  throw new Error('输入文档里的孤儿域字符没有被修掉');
+}
 
 console.log('\n全部校验通过 ✔');

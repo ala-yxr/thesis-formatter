@@ -4,3 +4,5 @@ test/_probe*.mjs
 test/_dbg*.js
 *.docx
 ~$*.docx
+# 本地调试/验证脚本与产物（下划线前缀，不随部署提交）
+test/_*

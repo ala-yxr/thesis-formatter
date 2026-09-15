@@ -96,6 +96,10 @@
     ['absHeadSize', 'number'], ['absBodySize', 'number'], ['refSize', 'number'], ['refHangingChars', 'number'],
     ['captionFont', 'select'], ['captionSize', 'number'],
     ['pageNumberSplit', 'check'], ['threeLineTable', 'check'], ['chapterPageBreak', 'check'],
+    ['bodyHeader', 'check'], ['updateFields', 'check'], ['citeSuperscript', 'check'],
+    ['clearHighlight', 'check'], ['cjkSpace', 'check'],
+    ['wordCaption', 'check'], ['chapterSection', 'check'],
+    ['chapterNumber', 'check'],
   ];
 
   // 行距采用「模式:数值」组合（如 exact:20 = 固定20磅，multiple:1.5 = 1.5倍）
@@ -492,7 +496,8 @@
   /* ---------- 下载 ---------- */
   function download() {
     if (!lastBlob || !lastFile) return;
-    const name = lastFile.name.replace(/\.docx$/i, '') + '_格式化.docx';
+    /* 文件名 = 原名 + 工具版本号（见 FormatTool.outputName） */
+    const name = FormatTool.outputName(lastFile.name);
     const url = URL.createObjectURL(lastBlob);
     const a = document.createElement('a');
     a.href = url;
@@ -553,5 +558,8 @@
   showGate();
   if (typeof FormatTool === 'undefined') {
     toast('核心引擎加载失败，请检查 js/formatter.js 是否存在', true);
+  } else {
+    const badge = $('#brandVer');
+    if (badge) badge.textContent = 'v' + FormatTool.VERSION;
   }
 })();

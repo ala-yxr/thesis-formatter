@@ -17,10 +17,13 @@
   var W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   var R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   var M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
+  var XML_NS = 'http://www.w3.org/XML/1998/namespace';
   var CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types';
   var PKG_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
   var CT_FOOTER = 'application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml';
   var REL_FOOTER = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer';
+  var CT_HEADER = 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml';
+  var REL_HEADER = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header';
   var MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
   /* ---------- 默认设置（重庆工程学院本科毕业设计（论文）撰写格式要求，附件8） ---------- */
@@ -63,7 +66,15 @@
     pageNumberSplit: true,         // 前置部分罗马数字、主体阿拉伯数字单独编页
     threeLineTable: true,          // 表格仅保留顶线/底线 1.5 磅，清除其余所有线条
     chapterPageBreak: true,        // 一级标题之间换页
-    autoToc: true                  // 目录替换为 Word 自动目录域（可整体选择、可更新）
+    chapterNumber: true,           // 一级标题改「1 绪论」体例（「第1章 绪论」→「1 绪论」）
+    autoToc: true,                 // 目录替换为 Word 自动目录域（可整体选择、可更新）
+    bodyHeader: true,              // 正文及各后置分节页眉 = 一级标题（章名，STYLEREF 域）
+    updateFields: true,            // 打开文档时自动更新域（目录页码自动刷新）
+    citeSuperscript: true,         // 正文引用标注 [n] 改为上标（附件8：右上角上标标注）
+    clearHighlight: true,          // 清除全文「突出显示」底色（论文不应带灰底标记）
+    cjkSpace: true,                // 删除正文中中文与英文/数字之间的空格（编号后的间隔保留）
+    chapterSection: true,          // 每章末尾补「分节符（下一页）」，便于逐章单独设置页眉
+    wordCaption: true              // 图片题注改用 Word 真题注（题注样式 + SEQ 域自动编号）
   };
 
   /* ---------- 结构识别正则 ---------- */
@@ -81,7 +92,9 @@
     h3:     /^[1-9]\d?\.\d{1,2}\.\d{1,2}\s/,
     h2:     /^[1-9]\d?\.\d{1,2}(?![\d.])\s*[^\d.]/,
     h2cn:   /^[一二三四五六七八九十]{1,3}[、.]/,
-    cap:    /^(图|表|Figure|Table)\s*\d/,
+    /* 附录内小节：A.1 / B.2.1（附件8：附录中的图、表、式另行编号，与正文分开） */
+    h2app:  /^[A-Z]\.\d{1,2}(?![\d.])\s*[^\d.]/,
+    cap:    /^(图|表|Figure|Table)\s*[A-Z]?\.?\s*\d/,
     ack:    /^致\s*谢/,
     app:    /^附\s*录/,
     tocItem: /\.{2,}|\s\d{1,3}\s*$/,  // 目录条目：带点线引导符或以页码结尾
@@ -106,11 +119,18 @@
     'textDirection','bidi','rtlGutter','docGrid','printerSettings','sectPrChange'];
 
   /* ---------- 基础工具 ---------- */
+  /* elm 未必是元素。有些工具生成的 docx 段落之间留着换行（按缩进排过版的更是如此），
+     解析后这些换行是**空白文本节点**；遍历 body 子节点、拿 nextSibling 当元素用时
+     就会摸到它们 —— 文本节点没有 getElementsByTagNameNS，直接抛 TypeError。
+     这里兜住返回空集：文本节点里当然不会有 w:fldChar 这类元素。
+     注意别用 nodeType === 1 去判 —— Document 也要走这条路（ensureTocStyles 传的是文档）。 */
   function allByNs(elm, name, ns) {
+    if (!elm || typeof elm.getElementsByTagNameNS !== 'function') return [];
     return elm.getElementsByTagNameNS(ns, name);
   }
   function wAll(elm, name) { return allByNs(elm, name, W_NS); }
   function childByNs(elm, name, ns) {
+    if (!elm) return null;
     for (var i = 0; i < elm.childNodes.length; i++) {
       var c = elm.childNodes[i];
       if (c.nodeType === 1 && c.localName === name && (!ns || c.namespaceURI === ns)) return c;
@@ -148,13 +168,44 @@
     }
     return wAll(p, 'lastRenderedPageBreak').length > 0;
   }
-  function serialize(doc) {
-    // 解析时 xml 声明会作为 PI 节点保留，序列化前移除，避免双重声明
+  /* 空命名空间节点计数（见 assertNamespaces）。模块级，每次 formatDocx 重置。 */
+  var emptyNsNodes = [];
+
+  function assertNamespaces(doc, part) {
+    /* 浏览器把 createElement('Foo') 建出来的元素当成「无命名空间」节点，
+       序列化时为了保住这个语义会补一个 xmlns="" —— 在 Word 眼里这个元素就
+       等于不存在。曾经因此让 [Content_Types].xml 里的 Override 失效，报
+       「文件已损坏」。node 端的 xmldom 不补这个声明，所以单测全绿也照样出
+       问题，只能在这里自己拦。 */
+    var els = doc.getElementsByTagName('*');
+    for (var i = 0; i < els.length; i++) {
+      var e = els[i];
+      if (e.namespaceURI) continue;
+      var parent = e.parentNode;
+      if (!parent || parent.nodeType !== 1 || !parent.namespaceURI) continue;
+      emptyNsNodes.push(part + ':' + e.nodeName);
+    }
+  }
+
+  var XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+
+  function serialize(doc, part) {
+    /* XML 声明在两个环境下表现相反，必须两边都照顾：
+       xmldom（Node 单测）：声明是文档的一个 PI 子节点，序列化器不再另出声明
+                            —— 所以要先摘掉，否则成品里会带两条；
+       浏览器：            DOMParser 根本不把声明建节点（doc.childNodes[0] 就是根
+                            元素），而 XMLSerializer 会把声明原样吐出来
+                            —— 所以还要防它自带的那条。
+       两头都防的办法：先摘 PI 节点，序列化后再把开头的声明削掉，最后统一补一条。
+       （曾经只按 xmldom 的行为写，浏览器产出的每个部件都带两条 XML 声明，
+         Word 打开直接报「文件已损坏」。） */
     while (doc.childNodes.length && doc.childNodes[0].nodeType === 7) {
       doc.removeChild(doc.childNodes[0]);
     }
-    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
-      new XMLSerializer().serializeToString(doc);
+    if (part) assertNamespaces(doc, part);
+    var out = new XMLSerializer().serializeToString(doc);
+    out = out.replace(/^\s*<\?xml[\s\S]*?\?>\s*/, '');
+    return XML_DECL + out;
   }
 
   /* ---------- 收集正文段落（跳过表格内部与空段落） ---------- */
@@ -224,6 +275,18 @@
   function isTocEntry(p, text) {
     if (!text) return false;
     if (RE.tocItem.test(text)) return true;
+    /* 本工具生成的目录条目：正文是标题文本（不带页码），页码由 PAGEREF _TocN 域给出。
+       域结果在重新格式化时是空的，文本里既没有点线也不以页码结尾，靠下面几条
+       特征全都认不出来 —— 于是第二次格式化时目录区边界会落在目录中间，
+       旧目录删一半留在正文里，还留下一个没有 begin 的 end 域字符
+       （Word 打开更新域时会把后面的正文一起吞掉，表现为「正文全没了」）。
+       PAGEREF _TocN / HYPERLINK _TocN 是目录条目独有的，见到即可判定 */
+    var el = p.p || p;                       // 调用方传的是条目对象（p 为段落元素）
+    var instrs = allByNs(el, 'instrText', W_NS);
+    for (var k = 0; k < instrs.length; k++) {
+      var ins = instrs[k].textContent || '';
+      if (/^\s*PAGEREF\s+"?_Toc\d+/i.test(ins) || /HYPERLINK\s+"?\\l"?\s+"?_Toc\d+/i.test(ins)) return true;
+    }
     var m = p.meta;
     if (!m) return false;
     if (/toc|目录/.test(m.style)) return true;
@@ -284,9 +347,23 @@
     var hasChapterStyle = texts.some(function (x) { return RE.h1.test(x); });
     var titleIdx = absIdx >= 0 ? findTitleUp(paras, absIdx) : -1;
     var enTitleIdx = absEnIdx >= 0 ? findTitleUp(paras, absEnIdx) : -1;
+    /* 无英文题目时 findTitleUp 会向上找到「关键词：…」行 —— 那不是题目，排除 */
+    if (enTitleIdx >= 0 && (enTitleIdx === kwIdx || enTitleIdx === absIdx || enTitleIdx === titleIdx)) enTitleIdx = -1;
+
+    // 第一个一级标题（须先于下方目录兜底识别计算，否则取不到值）
+    var firstH = -1;
+    for (var h = 0; h < n; h++) {
+      var ht = texts[h];
+      if (ht && (RE.h1.test(ht) || RE.h1Word.test(ht) || (!hasChapterStyle && RE.h1Alt.test(ht)))) { firstH = h; break; }
+    }
+    // 摘要正文区域边界：无"关键词"行时延伸到英文摘要标题或第一个章节标题
+    var absBodyEnd = kwIdx >= 0 ? kwIdx : (absEnIdx >= 0 ? absEnIdx : (firstH >= 0 ? firstH : n));
+    var absEnBodyEnd = kwEnIdx >= 0 ? kwEnIdx : (firstH >= 0 ? firstH : n);
 
     /* 无目录标题（「目 录」）时的兜底识别：摘要/关键词结束之后、第一个一级标题
-       之前，若存在 ≥2 个目录条目（tab+页码等特征），则视为目录章节 */
+       之前，若存在 ≥2 个目录条目（tab+页码等特征），则视为目录章节。
+       注意：firstH/absBodyEnd/absEnBodyEnd 必须先赋值（原实现因 var 提升
+       拿到 undefined，该兜底从未生效，此处已修正顺序） */
     if (tocIdx < 0 && firstH >= 0) {
       var scanFrom = Math.max(absBodyEnd, absEnBodyEnd, 0);
       var tocStart = -1, tocHits = 0;
@@ -298,15 +375,6 @@
     }
     var tocHasHead = tocIdx >= 0 && RE.toc.test(texts[tocIdx]);
     var tocEndIdx = tocIdx >= 0 ? tocEnd(paras, tocIdx, hasChapterStyle) : -1;
-
-    // 摘要正文区域边界：无"关键词"行时延伸到英文摘要标题或第一个章节标题
-    var firstH = -1;
-    for (var h = 0; h < n; h++) {
-      var ht = texts[h];
-      if (ht && (RE.h1.test(ht) || RE.h1Word.test(ht) || (!hasChapterStyle && RE.h1Alt.test(ht)))) { firstH = h; break; }
-    }
-    var absBodyEnd = kwIdx >= 0 ? kwIdx : (absEnIdx >= 0 ? absEnIdx : (firstH >= 0 ? firstH : n));
-    var absEnBodyEnd = kwEnIdx >= 0 ? kwEnIdx : (firstH >= 0 ? firstH : n);
 
     /* 逐段归类 */
     var inBack = false;
@@ -328,8 +396,13 @@
       if (absIdx >= 0 && i2 > absIdx && i2 < absBodyEnd) { roles[i2] = 'absBody'; continue; }
       if (absEnIdx >= 0 && i2 > absEnIdx && i2 < absEnBodyEnd) { roles[i2] = 'absEnBody'; continue; }
       if (RE.cap.test(tx)) { roles[i2] = 'caption'; continue; }  // 题注优先于参考文献/后置部分判定（附录里的图1、表1等）
+      // 后置部分（附录）里的纯图片段也要认成 figure，否则会掉进下面的 body 分支，
+      // 图题就永远不会被真题注化（附件8 要求附录内图表另行编号）
+      if (refIdx >= 0 && i2 > refIdx && !tx && paras[i2].hasDrawing) { roles[i2] = 'figure'; continue; }
       if (refIdx >= 0 && i2 > refIdx) {
         if (RE.ack.test(tx) || RE.app.test(tx)) { roles[i2] = 'h1'; inBack = true; }
+        // 附录内小节（A.1、B.2 …）按二级标题排版；题注已在上面判过
+        else if (inBack && RE.h2app.test(tx) && tx.length <= 40) roles[i2] = 'h2';
         else roles[i2] = inBack ? 'body' : 'refItem';
         continue;
       }
@@ -338,7 +411,7 @@
       if (RE.h1.test(tx) || (!hasChapterStyle && RE.h1Alt.test(tx)) || RE.h1Word.test(tx)) { roles[i2] = 'h1'; continue; }
       /* 二/三级标题判定加长度守卫：正文长句（如「1.5倍…」「0.96英寸…」）不当作标题 */
       if (RE.h3.test(tx) && tx.length <= 40) { roles[i2] = 'h3'; continue; }
-      if ((RE.h2.test(tx) || RE.h2cn.test(tx)) && tx.length <= 40) { roles[i2] = 'h2'; continue; }
+      if ((RE.h2.test(tx) || RE.h2cn.test(tx) || RE.h2app.test(tx)) && tx.length <= 40) { roles[i2] = 'h2'; continue; }
       roles[i2] = 'body';
     }
 
@@ -461,6 +534,231 @@
       applyRun(runs[i], doc, cursor < labelLen ? labelSt : bodySt);
       cursor += t.length;
     }
+  }
+
+  /* 引用文献标注上标：《附件8》要求"正文中引用的文献应在所引用原文内容最末句的
+     右上角以上标方式进行标注，并按先后顺序连续编号置于方括号内"。
+     只处理形如 [1] / [1,2] / [1-3] 的标注；参考文献表自身的序号（refItem）不动。 */
+  var CITE_RE = /\[\d+(?:\s*[,\-–—]\s*\d+)*\]/g;
+
+  function applyCiteSuperscript(p, doc) {
+    var runs = wAll(p, 'r');
+    for (var i = 0; i < runs.length; i++) {
+      var r = runs[i];
+      var t = runText(r);
+      if (!t || t.indexOf('[') < 0) continue;
+      CITE_RE.lastIndex = 0;
+      if (!CITE_RE.test(t)) continue;
+      /* 含制表符/换行/域代码的 run 直接跳过（拆分 runText 会丢失这些结构） */
+      var struct = false;
+      for (var c = 0; c < r.childNodes.length; c++) {
+        var cn = r.childNodes[c];
+        if (cn.nodeType === 1 && cn.localName !== 'rPr' && cn.localName !== 't') { struct = true; break; }
+      }
+      if (struct) continue;
+      var rPr0 = childByNs(r, 'rPr', W_NS);
+      var va0 = rPr0 ? childByNs(rPr0, 'vertAlign', W_NS) : null;
+      if (va0 && va0.getAttributeNS(W_NS, 'val') === 'superscript') continue;  // 已是上标
+      CITE_RE.lastIndex = 0;
+      var segs = [], last = 0, m;
+      while ((m = CITE_RE.exec(t))) {
+        if (m.index > last) segs.push({ s: t.slice(last, m.index), sup: false });
+        segs.push({ s: m[0], sup: true });
+        last = m.index + m[0].length;
+      }
+      if (last < t.length) segs.push({ s: t.slice(last), sup: false });
+      if (segs.length < 2) continue;
+      var parent = r.parentNode;
+      for (var k = 0; k < segs.length; k++) {
+        var nr = createW(doc, 'r');
+        var rPr = rPr0 ? rPr0.cloneNode(true) : null;
+        if (rPr) nr.appendChild(rPr);
+        if (segs[k].sup) {
+          if (!rPr) { rPr = createW(doc, 'rPr'); nr.appendChild(rPr); }
+          var va = childByNs(rPr, 'vertAlign', W_NS);
+          if (!va) { va = createW(doc, 'vertAlign'); insertInOrder(rPr, va, RPR_ORDER); }
+          va.setAttributeNS(W_NS, 'w:val', 'superscript');
+        }
+        var nt = createW(doc, 't');
+        nt.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+        nt.appendChild(doc.createTextNode(segs[k].s));
+        nr.appendChild(nt);
+        parent.insertBefore(nr, r);
+      }
+      parent.removeChild(r);
+    }
+  }
+
+  /* ---------- 清除「突出显示」底色 ----------
+     论文不应带任何灰底/彩底标记（写作时标英文术语很常见），交付前一律清掉。
+     只删 w:highlight（工具条上的「突出显示」），字符底纹 w:shd 不动——它常被
+     模板用来做表头底色等正常排版。 */
+  function clearHighlights(doc) {
+    var list = allByNs(doc, 'highlight', W_NS);   // 可能是 live NodeList，先快照
+    var hls = [];
+    for (var i = 0; i < list.length; i++) hls.push(list[i]);
+    var n = 0;
+    for (var j = hls.length - 1; j >= 0; j--) {
+      if (hls[j].parentNode) { hls[j].parentNode.removeChild(hls[j]); n++; }
+    }
+    return n;
+  }
+
+  /* ---------- 页眉/页脚里的孤儿标点清理 ----------
+     来源文档（模板复制、WPS 导出最常见）常在页码域前留下一个只含顿号的 run，
+     排出来就是页脚上的「、33」。判定条件收得很紧：该 run 的文字**只有**一个
+     全角标点，且与 PAGE 域同段，且在文本框之外——页码语境里这一定是残留。
+     「第3页，共10页」这类正常写法里标点不会单独成 run，不会被误删。 */
+  function isInTextbox(el, stop) {
+    for (var a = el.parentNode; a && a !== stop; a = a.parentNode) {
+      if (a.localName === 'txbxContent') return true;
+    }
+    return false;
+  }
+  async function cleanFooterStrayPunct(zip) {
+    var removed = 0;
+    var names = Object.keys(zip.files).filter(function (f) {
+      return /^word\/(?:header|footer)\d*\.xml$/.test(f);
+    });
+    for (var i = 0; i < names.length; i++) {
+      var entry = zip.file(names[i]);
+      if (!entry) continue;
+      var xml = await entry.async('string');
+      if (xml.indexOf('PAGE') < 0) continue;
+      var hDoc = new DOMParser().parseFromString(xml, 'application/xml');
+      var ps = allByNs(hDoc, 'p', W_NS);
+      var touched = false;
+      for (var k = 0; k < ps.length; k++) {
+        var instr = allByNs(ps[k], 'instrText', W_NS), hasPage = false;
+        for (var q = 0; q < instr.length; q++) {
+          if (/PAGE/.test(instr[q].textContent || '')) { hasPage = true; break; }
+        }
+        if (!hasPage) continue;
+        var runs = allByNs(ps[k], 'r', W_NS);
+        for (var r = runs.length - 1; r >= 0; r--) {
+          var run = runs[r];
+          if (isInTextbox(run, ps[k])) continue;
+          var ts = wAll(run, 't'), s = '';
+          for (var t = 0; t < ts.length; t++) s += ts[t].textContent || '';
+          if (/^[、，。；：,;]$/.test(s) && run.parentNode) {
+            run.parentNode.removeChild(run); removed++; touched = true;
+          }
+        }
+      }
+      if (touched) zip.file(names[i], serialize(hDoc, names[i]));
+    }
+    return removed;
+  }
+
+  /* ---------- 删除中西文之间的空格 ----------
+     附件8 要求标题/题注「数字与文字间隔一字符」（1 绪论、图4.1 系统图），
+     所以**段首编号之后的那个空格必须保留**，其余中文与英文/数字之间的空格
+     一律删除（「采用 Node.js」→「采用Node.js」）。
+     中文侧含汉字与中文标点（全角括号、顿号等），但排除全角字母数字。 */
+  var CJK_CH = '[\\u3000-\\u303f\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff' +
+               '\\uff01-\\uff0f\\uff1a-\\uff20\\uff3b-\\uff40\\uff5b-\\uff65]';
+  var LAT_CH = '[0-9A-Za-z]';
+  /* 段首编号：1 / 1.1 / 1.1.1 / A.1 / 图4.1 / 表7.2 —— 连同其后的空格一起保留 */
+  var NUM_HEAD = /^(?:\d{1,2}(?:\.\d{1,2}){0,2}|[A-Z]\.\d{1,2}(?:\.\d{1,2}){0,2}|[图表]\s*\d{1,2}(?:\.\d{1,2}){0,2}|附\s*录\s*[A-Za-z0-9])\s+/;
+  /* 需要保留段首编号间隔的角色：标题、目录条目、图表题注 */
+  var KEEP_NUM_ROLE = { h1: 1, h2: 1, h3: 1, tocItem: 1, caption: 1, refHead: 1 };
+
+  /* 段落正文文字节点（run 内的直接 w:t，以及超链接/域内的 run；跳过文本框与图形） */
+  function paraTextNodes(p) {
+    var nodes = [];
+    function walk(el) {
+      for (var i = 0; i < el.childNodes.length; i++) {
+        var c = el.childNodes[i];
+        if (c.nodeType !== 1) continue;
+        if (c.localName === 'r') {
+          for (var j = 0; j < c.childNodes.length; j++) {
+            var t = c.childNodes[j];
+            if (t.nodeType === 1 && t.localName === 't') nodes.push(t);
+          }
+        } else if (c.localName === 'hyperlink' || c.localName === 'fldSimple' ||
+                   c.localName === 'smartTag' || c.localName === 'sdt') {
+          walk(c);
+        }
+        /* drawing / pict / txbxContent 内的文字与段落正文无连续关系，跳过 */
+      }
+    }
+    walk(p);
+    return nodes;
+  }
+
+  function removeCjkLatinSpaces(doc, paras, roles) {
+    var changed = 0;
+    for (var i = 0; i < paras.length; i++) {
+      var role = roles[i];
+      if (role === 'front' || role === 'figure' || role === 'formula') continue;
+      changed += joinCjkSpaceInPara(paras[i].p, role);
+    }
+    /* 表格单元格：正文清了表内不清会两套口径。表内只删空格字符，
+       字号/字体/列宽/对齐一律不动，不会撑破版面。
+       单元格段落同样套用「段首编号后保留一字符」的守卫。 */
+    if (doc) {
+      var tbls = wAll(doc, 'tbl');
+      for (var t = 0; t < tbls.length; t++) {
+        var cps = wAll(tbls[t], 'p');
+        for (var c = 0; c < cps.length; c++) changed += joinCjkSpaceInPara(cps[c], 'body');
+      }
+    }
+    return changed;
+  }
+
+  /* 删除单段里中文↔英文/数字之间的空格，返回删除的空格数 */
+  function joinCjkSpaceInPara(p, role) {
+    var changed = 0;
+    {
+      var nodes = paraTextNodes(p);
+      if (!nodes.length) return 0;
+
+      /* 拼出整段文字；owner[全局下标] = {n: 第几个节点, o: 节点内偏移} */
+      var full = '', owner = [];
+      for (var k = 0; k < nodes.length; k++) {
+        var s = nodes[k].textContent || '';
+        for (var q = 0; q < s.length; q++) owner.push({ n: k, o: q });
+        full += s;
+      }
+      /* 标题/目录/题注：段首编号连同其后的空格一起保留（附件8：数字与文字间隔一字符） */
+      var guard = KEEP_NUM_ROLE[role] ? (NUM_HEAD.exec(full) || [''])[0].length : 0;
+
+      var del = {};
+      var pats = [
+        new RegExp('(' + CJK_CH + ')([ \\t]+)(' + LAT_CH + ')', 'g'),
+        new RegExp('(' + LAT_CH + ')([ \\t]+)(' + CJK_CH + ')', 'g')
+      ];
+      for (var pi = 0; pi < pats.length; pi++) {
+        var re = pats[pi], m;
+        while ((m = re.exec(full))) {
+          var start = m.index + m[1].length;
+          for (var si = 0; si < m[2].length; si++) {
+            if (start + si >= guard) del[start + si] = 1;
+          }
+          re.lastIndex = start + m[2].length;   // 从空格后的字符继续，允许连排命中
+        }
+      }
+      var pos = Object.keys(del);
+      if (!pos.length) return 0;
+
+      /* 按节点回写：只删字符、不增不改，节点边界不受影响 */
+      var hit = {};                             // 节点序号 → { 节点内偏移: 1 }
+      for (var d = 0; d < pos.length; d++) {
+        var ow = owner[+pos[d]];
+        if (!ow) continue;
+        (hit[ow.n] = hit[ow.n] || {})[ow.o] = 1;
+      }
+      for (var nk in hit) {
+        if (!Object.prototype.hasOwnProperty.call(hit, nk)) continue;
+        var node = nodes[+nk];
+        var txt = node.textContent || '';
+        var out = '';
+        for (var ci = 0; ci < txt.length; ci++) { if (!hit[nk][ci]) out += txt.charAt(ci); }
+        node.textContent = out;
+        changed += txt.length - out.length;    // 计数按「删掉的空格数」，不是「改过的节点数」
+      }
+    }
+    return changed;
   }
 
   /* ---------- 应用 pPr（行距/缩进/对齐） ---------- */
@@ -656,6 +954,11 @@
       }
       if (role === 'kw' || role === 'kwEn') formatKeywords(p, doc, st, role);
       else formatRuns(p, doc, st);
+      /* 引用标注上标：参考文献表序号（refItem）与封面（front）不处理 */
+      if (settings.citeSuperscript !== false &&
+          role !== 'front' && role !== 'figure' && role !== 'refItem' && role !== 'formula') {
+        applyCiteSuperscript(p, doc);
+      }
     }
   }
 
@@ -742,6 +1045,12 @@
     for (var rr = 0; rr < tbl.childNodes.length; rr++) {
       var rc = tbl.childNodes[rr];
       if (rc.nodeType !== 1 || rc.localName !== 'tr') continue;
+      /* 行级表格属性例外 w:tblPrEx 里的 tblBorders 优先于表级 tblBorders：
+         源文档每行都带蓝色全网格（#9AA5B8），不清掉则三线表失效 */
+      var exs = wAll(rc, 'tblPrEx');
+      for (var e2 = exs.length - 1; e2 >= 0; e2--) {
+        if (exs[e2].parentNode === rc) rc.removeChild(exs[e2]);
+      }
       var trPr = childByNs(rc, 'trPr', W_NS);
       if (!trPr) { trPr = createW(doc, 'trPr'); rc.insertBefore(trPr, rc.firstChild); }
       if (!childByNs(trPr, 'cantSplit', W_NS)) {
@@ -830,6 +1139,63 @@
     return n;
   }
 
+  /* 域字符（w:fldChar）配平兜底 —— 保证导出的文档不存在不配平的域。
+     出问题的场景：文档里本来就有 Word 目录域，重新格式化时若目录区只删掉一半，
+     正文里就会留下一个没有 begin 的 end；Word 打开（更新域）后会把其后的内容
+     当成域的一部分处理，用户看到的就是「正文内容全部消失」。
+     这里删掉没有 begin 配对的 end/separate，并给没有 end 收尾的 begin 就地补 end。 */
+  function repairFields(doc) {
+    var body = allByNs(doc, 'body', W_NS)[0];
+    if (!body) return 0;
+    var stack = [], fixed = 0;
+
+    function dropRunOf(fc) {
+      var r = fc.parentNode;
+      if (r && r.nodeType === 1 && r.localName === 'r') {
+        r.removeChild(fc);
+        if (!r.firstChild && r.parentNode) r.parentNode.removeChild(r);
+      } else if (r) {
+        r.removeChild(fc);
+      }
+    }
+
+    (function walk(node, curPara) {
+      for (var n = node.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType !== 1) continue;
+        var ln = n.localName;
+        var p = (ln === 'p') ? n : curPara;
+        if (p !== curPara) {
+          /* 进入新段落：尚未闭合的域若继续延伸，最后一段跟着前移 */
+          for (var s = 0; s < stack.length; s++) stack[s].para = p;
+        }
+        if (ln === 'fldChar') {
+          var t = n.getAttributeNS(W_NS, 'fldCharType') || '';
+          if (t === 'begin') stack.push({ node: n, para: p });
+          else if (t === 'end') {
+            if (stack.length) stack.pop();
+            else { dropRunOf(n); fixed++; }         // 孤儿 end
+          } else if (t === 'separate') {
+            if (!stack.length) { dropRunOf(n); fixed++; }   // 孤儿 separate
+          }
+          continue;
+        }
+        walk(n, p);
+      }
+    })(body, null);
+
+    for (var i = 0; i < stack.length; i++) {        // 未闭合的 begin → 补 end
+      var host = stack[i].para;
+      if (!host) continue;
+      var r = createW(doc, 'r');
+      var fc = createW(doc, 'fldChar');
+      fc.setAttributeNS(W_NS, 'w:fldCharType', 'end');
+      r.appendChild(fc);
+      host.appendChild(r);
+      fixed++;
+    }
+    return fixed;
+  }
+
   /* 图片所在段落统一改为单倍行距（line=240, lineRule=auto）：
      固定行距（如 20 磅）会把高于行距的图片截断显示不全，
      单倍行距行高随内容自适应，图片可完整显示。
@@ -852,6 +1218,386 @@
       // 图片居中对齐（附件8：插图居中排版）
       setJc(doc, pPr, 'center');
     }
+  }
+
+  /* ---------- 一级标题改「1 绪论」体例（附件8 理工类） ----------
+     附件8：一级标题写「1 绪论」——章号用阿拉伯数字，数字与文字间隔一字符，
+     不写「第1章 绪论」。只动标题段与目录里的对应条目；正文里指代章节的
+     「第5章」保持不动——那是叙述不是标题（「数据生成规则将在第5章如实给出」），
+     改了反而不通顺。
+     附录：附件8「附录如果为多个附件，依序用附录A、附录B、附录C……编序号，
+     否则只用『附录』」，所以单个附录去掉序号（附录1 → 附录）、多个附录依序
+     给字母（附录1 / 附录2 → 附录A / 附录B）；附录里的图表随之用字母编号
+     （图A1，字母与序号之间没有「.」）。 */
+  var CN_DIG = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  /* 「二十三」→ 23；认不出来（如「第一章」之外的花样）返回空串，调用处放弃改写 */
+  function cnNumToArabic(s) {
+    if (/^\d+$/.test(s)) return String(parseInt(s, 10));
+    var total = 0, cur = 0;
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === '十') { cur = (cur || 1) * 10; total += cur; cur = 0; }
+      else if (ch === '百') { cur = (cur || 1) * 100; total += cur; cur = 0; }
+      else if (ch === '千') { cur = (cur || 1) * 1000; total += cur; cur = 0; }
+      else if (CN_DIG[ch] !== undefined) cur = CN_DIG[ch];
+      else return '';
+    }
+    total += cur;
+    return total > 0 ? String(total) : '';
+  }
+
+  /* 改写文本节点内容。首尾带空格的（章号常被拆成「1 」+「绪论」两个 run）
+     要补 xml:space="preserve" —— 否则 Word 会把那个空格吃掉，标题成「1绪论」 */
+  function setRunText(node, s) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+    node.appendChild(node.ownerDocument.createTextNode(s));
+    if (/^\s|\s$/.test(s)) node.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+  }
+
+  /* 把段落开头的 n 个字符换成 newText。章号常被拆在「第」「1」「章」几个 run
+     里，所以整段拼串定位，再按下标写回各文本节点（只改文字，格式不动） */
+  function replaceParaPrefix(p, n, newText) {
+    var nodes = paraTextNodes(p);
+    if (!nodes.length) return false;
+    var texts = [], starts = [], acc = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      texts.push(nodes[i].textContent || '');
+      starts.push(acc);
+      acc += texts[i].length;
+    }
+    if (acc < n) return false;
+    /* 新编号写进「前缀最后一个字符所在」的那个节点：前缀正好在节点边界结束
+       （「第1章 」自成一个 run、标题在下一个 run）时也算它，否则编号会被清空。
+       它前面的节点清空，它后面的节点原样保留 */
+    var last = 0;
+    for (var k = 0; k < nodes.length; k++) {
+      if (starts[k] < n) last = k; else break;
+    }
+    for (var c = 0; c < last; c++) setRunText(nodes[c], '');
+    setRunText(nodes[last], newText + texts[last].slice(n - starts[last]));
+    return true;
+  }
+
+  /* 返回改写的段落数；paras[i].text 同步更新（后续几个 pass 还在读它） */
+  function rewriteChapterHeadings(paras, roles) {
+    /* 附录先点名：附件8 只有一个附录时不编序号，多个才依序编 A、B、C。
+       若各附录本来就有字母，保留原字母（正文里「详见附录B」这类指代不会错位） */
+    var apps = [], allLetter = true;
+    for (var a = 0; a < paras.length; a++) {
+      if (roles[a] !== 'h1' || !RE.app.test(paras[a].text)) continue;
+      apps.push(a);
+      if (!/^附\s*录\s*[A-Za-z]/.test(paras[a].text)) allLetter = false;
+    }
+    var appLetter = {};
+    for (var b = 0; b < apps.length; b++) {
+      if (apps.length < 2) appLetter[apps[b]] = '';               // 单个附录：只用「附录」
+      else if (allLetter) appLetter[apps[b]] = /^附\s*录\s*([A-Za-z])/.exec(paras[apps[b]].text)[1].toUpperCase();
+      else appLetter[apps[b]] = b < 26 ? String.fromCharCode(65 + b) : String(b + 1);
+    }
+
+    var changed = 0, tocAppSeen = 0;
+    for (var i = 0; i < paras.length; i++) {
+      var role = roles[i];
+      if (role !== 'h1' && role !== 'tocItem') continue;
+      var live = paraText(paras[i].p);
+      var lead = live.length - live.replace(/^\s+/, '').length;   // 段首空格不参与匹配
+      var head = live.slice(lead);
+      var n = 0, newText = '';
+
+      var m = /^第\s*([一二三四五六七八九十百千零两0-9]+)\s*章\s*/.exec(head);
+      if (m) {
+        /* 「第4章 系统总体设计」→「4 系统总体设计」；「第一章 绪论」一并转成阿拉伯数字 */
+        var num = cnNumToArabic(m[1]);
+        if (!num) continue;
+        n = m[0].length;
+        newText = head.slice(n) ? num + ' ' : num;                // 编号与标题间隔一字符（附件8）
+      } else if (RE.app.test(head)) {
+        var letter;
+        if (role === 'h1') letter = appLetter[i] || '';
+        else {                                                    // 目录条目按顺序对应各附录
+          var src = apps[tocAppSeen]; tocAppSeen++;
+          letter = src === undefined ? '' : (appLetter[src] || '');
+        }
+        var ma = /^附\s*录\s*[A-Za-z0-9一二三四五六七八九十]*[.\s]*/.exec(head);
+        if (!ma) continue;
+        n = ma[0].length;
+        newText = (head.slice(n) ? '附录' + letter + ' ' : '附录' + letter);
+      }
+      if (!newText) continue;
+      var result = newText + head.slice(n);
+      if (result === head) continue;                              // 已是目标体例：不动
+      if (!replaceParaPrefix(paras[i].p, lead + n, newText)) continue;
+      paras[i].text = result.trim();
+      changed++;
+    }
+    return changed;
+  }
+
+  /* ---------- 图片题注改用 Word 真题注（题注样式 + SEQ 域自动编号） ----------
+     附件8：图按章编号、图题置于图片正下方。不用手打数字，而是套 Word 的
+     「题注」样式 + SEQ 域：
+         图<章号>.{ SEQ 图 \* ARABIC \r 1 }  名称
+     每章第一条题注带 \r 1（把序号重置为 1），本章其余题注用普通 SEQ 递增，
+     于是增删图片时章内序号自动重排，也能用「引用 → 插入表目录」生成图表目录。
+     章号写成固定文字：本工具的章标题是手打编号，STYLEREF \s 取不到章号。
+     附录里的图用附录字母编号（图A1，附件8：附录图表另行编号）。 */
+  function captionChapterNo(text) {
+    var t = String(text || '').trim();
+    var m = /^第\s*([1-9]\d?)\s*章/.exec(t);         // 「第4章 系统总体设计」（旧体例）
+    if (m) return m[1];
+    m = /^([1-9]\d?)\s+\S/.exec(t);                  // 「4 系统总体设计」（附件8 体例）
+    if (m) return m[1];
+    m = /^附\s*录\s*([A-Za-z0-9])/.exec(t);          // 「附录A 部署与运行步骤」
+    if (m) return m[1].toUpperCase();
+    if (RE.app.test(t)) return 'A';                  // 只一个附录时不编序号，图仍用字母（图A1）
+    return '';
+  }
+  /* 从现有题注里取出名称：「图4-1 系统总体架构图」→「系统总体架构图」 */
+  function captionName(text) {
+    return String(text || '')
+      .replace(/^(图|表|Figure|Table)\s*[A-Z]?\.?\s*\d+(?:\s*[.\-–—]\s*\d+)*\s*/, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+
+  async function ensureCaptionStyle(zip) {
+    var entry = zip.file('word/styles.xml');
+    if (!entry) return null;
+    var stDoc = new DOMParser().parseFromString(await entry.async('string'), 'application/xml');
+    var styles = stDoc.getElementsByTagNameNS(W_NS, 'style');
+    var used = {}, found = null;
+    for (var i = 0; i < styles.length; i++) {
+      var sid = styles[i].getAttributeNS(W_NS, 'styleId') || '';
+      if (sid) used[sid] = true;
+      var nm = childByNs(styles[i], 'name', W_NS);
+      if (!nm) continue;
+      var n = (nm.getAttributeNS(W_NS, 'val') || '').trim();
+      /* 内置「题注」样式的规范名是 caption（中文版 Word 显示为「题注」） */
+      if (!found && /^(caption|题注)$/i.test(n)) found = sid;
+    }
+    if (!found) {
+      var newId = 'Caption', k = 1;
+      while (used[newId]) { k++; newId = 'Caption' + k; }
+      var st = createW(stDoc, 'style');
+      st.setAttributeNS(W_NS, 'w:type', 'paragraph');
+      st.setAttributeNS(W_NS, 'w:styleId', newId);
+      var nEl = createW(stDoc, 'name');
+      nEl.setAttributeNS(W_NS, 'w:val', 'caption');
+      st.appendChild(nEl);
+      var bo = createW(stDoc, 'basedOn');
+      bo.setAttributeNS(W_NS, 'w:val', 'Normal');
+      st.appendChild(bo);
+      var nx = createW(stDoc, 'next');
+      nx.setAttributeNS(W_NS, 'w:val', 'Normal');
+      st.appendChild(nx);
+      stDoc.documentElement.appendChild(st);
+      zip.file('word/styles.xml', serialize(stDoc, 'word/styles.xml'));
+      found = newId;
+    }
+    return found;
+  }
+
+  /* 重写题注段落内容（保留 pPr）：图<章>. + SEQ 域 + 空格 + 名称。
+     seqName 为「图」或「表」——SEQ 域按名字各自计数，图和表互不干扰。 */
+  function setCaptionContent(doc, p, chap, no, name, seqName, isApp) {
+    for (var i = p.childNodes.length - 1; i >= 0; i--) {
+      var c = p.childNodes[i];
+      if (c.nodeType === 1 && c.localName === 'pPr') continue;
+      p.removeChild(c);
+    }
+    function txtRun(s) {
+      var r = createW(doc, 'r');
+      var t = createW(doc, 't');
+      t.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+      t.appendChild(doc.createTextNode(s));
+      r.appendChild(t);
+      return r;
+    }
+    function fldRun(kind, instr) {
+      var r = createW(doc, 'r');
+      if (kind === 'instr') {
+        var it = createW(doc, 'instrText');
+        it.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+        it.appendChild(doc.createTextNode(instr));
+        r.appendChild(it);
+      } else if (kind === 'text') {
+        var t = createW(doc, 't');
+        t.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+        t.appendChild(doc.createTextNode(instr));
+        r.appendChild(t);
+      } else {
+        var fc = createW(doc, 'fldChar');
+        fc.setAttributeNS(W_NS, 'w:fldCharType', kind);
+        r.appendChild(fc);
+      }
+      return r;
+    }
+    var sn = seqName || '图';
+    /* 附录里用字母编号，附件8 的写法是「图A1」（字母与序号之间没有「.」）；
+       正文里是「图4.1」 */
+    var sep = (isApp && /^[A-Z]$/.test(String(chap))) ? '' : '.';
+    p.appendChild(txtRun(sn + chap + sep));
+    p.appendChild(fldRun('begin'));
+    p.appendChild(fldRun('instr', ' SEQ ' + sn + ' \\* ARABIC' + (no === 1 ? ' \\r 1' : '') + ' '));
+    p.appendChild(fldRun('separate'));
+    p.appendChild(fldRun('text', String(no)));
+    p.appendChild(fldRun('end'));
+    if (name) p.appendChild(txtRun(' ' + name));
+    return p;
+  }
+
+  function setPStyle(doc, p, styleId) {
+    if (!styleId) return;
+    var pPr = childByNs(p, 'pPr', W_NS);
+    if (!pPr) { pPr = createW(doc, 'pPr'); p.insertBefore(pPr, p.firstChild); }
+    var ps = childByNs(pPr, 'pStyle', W_NS);
+    if (!ps) { ps = createW(doc, 'pStyle'); pPr.insertBefore(ps, pPr.firstChild); }
+    ps.setAttributeNS(W_NS, 'w:val', styleId);
+  }
+
+  /* 遍历正文，把图片下方的题注换成分域真题注；没有题注的补一条占位题注。
+     新写入的 run 不带格式，这里按题注样式重新排一遍。
+     返回 { done, placeholders }，占位题注的名称留空，由作者补写。 */
+  function applyWordCaptions(doc, body, paras, roles, frontBoundary, capSt, capStyleId) {
+    var curChap = '', curApp = false, figNo = 0, tabNo = 0, done = 0, placeholders = 0;
+
+    /* 段落元素 → 角色。图和表共用同一个章号，必须顺着 body 一次走完，
+       不能先遍历图、再遍历表，否则跨章的序号会错。 */
+    var roleByEl = {};
+    for (var r = 0; r < paras.length; r++) roleByEl[paras[r].p] = roles[r];
+
+    /* 题注要跟图片/表格排在同一页，且自身不跨页 */
+    function finishCaption(capEl, chap, no, name, seqName, isApp) {
+      setCaptionContent(doc, capEl, chap, no, name, seqName, isApp);
+      var cpPr = childByNs(capEl, 'pPr', W_NS);
+      if (!cpPr) { cpPr = createW(doc, 'pPr'); capEl.insertBefore(cpPr, capEl.firstChild); }
+      setKeep(cpPr, doc, 'keepLines');
+      /* 新 run 没有字体字号：按题注样式补排一遍 */
+      if (capSt) { setParaFormat(capEl, doc, capSt); formatRuns(capEl, doc, capSt); }
+      setPStyle(doc, capEl, capStyleId);
+      done++;
+    }
+    /* 跨过空段找相邻的实质元素（dir=1 向下、-1 向上） */
+    function skipBlanks(from, dir) {
+      var s = from;
+      while (s) {
+        if (s.nodeType !== 1) { s = dir > 0 ? s.nextSibling : s.previousSibling; continue; }
+        if (s.localName === 'p' && !paraText(s).trim() &&
+            !wAll(s, 'drawing').length && !wAll(s, 'pict').length) {
+          s = dir > 0 ? s.nextSibling : s.previousSibling; continue;
+        }
+        return s;
+      }
+      return null;
+    }
+
+    /* 必须先快照 body 的子元素：给没有题注的表补占位题注时要插在表格**之前**，
+       按 live 的 childNodes 下标遍历会让同一张表再被访问一次，表号跳成 1、3、5… */
+    var kids = [];
+    for (var c0 = 0; c0 < body.childNodes.length; c0++) {
+      var c1 = body.childNodes[c0];
+      if (c1.nodeType === 1) kids.push(c1);
+    }
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+
+      if (el.localName === 'p') {
+        var role = roleByEl[el];
+        if (role === 'h1' || role === 'refHead') {
+          /* 认不出章号（参考文献/致谢等）→ 停用编号，这些区域不误编成上一章的号 */
+          var hText = paraText(el).trim();
+          curChap = captionChapterNo(hText);
+          curApp = RE.app.test(hText);          // 附录：图题用「图A1」而不是「图A.1」
+          figNo = 0; tabNo = 0;
+          continue;
+        }
+        if (role !== 'figure') continue;
+        if (isFrontElement(el, frontBoundary)) continue;   // 封面图片不动
+        if (!curChap) continue;                           // 不在任何章节内 → 不动
+
+        /* 图题在图片正下方 */
+        var nxt = skipBlanks(el.nextSibling, 1);
+        var capEl = null, name = '';
+        if (nxt && nxt.localName === 'p') {
+          var nt = paraText(nxt).trim();
+          if (RE.cap.test(nt) && /^(图|Figure)/.test(nt)) { capEl = nxt; name = captionName(nt); }
+        }
+        figNo++;
+        if (!capEl) {
+          capEl = createW(doc, 'p');
+          body.insertBefore(capEl, nxt);
+          placeholders++;
+        }
+        finishCaption(capEl, curChap, figNo, name, '图', curApp);
+        continue;
+      }
+
+      if (el.localName === 'tbl') {
+        if (isFrontElement(el, frontBoundary)) continue;
+        if (!curChap) continue;
+
+        /* 表题在表格正上方（附件8） */
+        var prv = skipBlanks(el.previousSibling, -1);
+        var tCapEl = null, tName = '';
+        if (prv && prv.localName === 'p') {
+          var pt = paraText(prv).trim();
+          if (RE.cap.test(pt) && /^(表|Table)/.test(pt)) { tCapEl = prv; tName = captionName(pt); }
+        }
+        tabNo++;
+        if (!tCapEl) {
+          tCapEl = createW(doc, 'p');
+          body.insertBefore(tCapEl, el);
+          placeholders++;
+        }
+        finishCaption(tCapEl, curChap, tabNo, tName, '表', curApp);
+      }
+    }
+    return { done: done, placeholders: placeholders };
+  }
+
+  /* ---------- 正文交叉引用同步 ----------
+     题注改成「图4.1」「表4.1」后，正文里的「如图4-1所示」「表4-2~表4-4」
+     必须一起改，否则题注和引用对不上，比不改还糟。
+     「图4-1」→「图4.1」是等长替换，所以可以直接按字符位改，
+     不必重建文本节点（匹配可能跨 run，按整段拼串定位）。 */
+  function normalizeFigureRefs(paras, roles) {
+    var fixed = 0;
+    for (var i = 0; i < paras.length; i++) {
+      var role = roles[i];
+      if (role === 'front' || role === 'tocItem' || role === 'tocHead' ||
+          role === 'caption' || role === 'figure' || role === 'formula') continue;
+      var nodes = paraTextNodes(paras[i].p);
+      if (!nodes.length) continue;
+      var texts = [], starts = [], acc = 0;
+      for (var n = 0; n < nodes.length; n++) {
+        var s = nodes[n].textContent || '';
+        texts.push(s); starts.push(acc); acc += s.length;
+      }
+      var joined = texts.join('');
+      if (joined.indexOf('-') < 0) continue;
+      var re = /[图表]\s*(\d{1,2})\s*-\s*(\d{1,2})/g, m, hits = [];
+      while ((m = re.exec(joined))) {
+        /* 「图表-1」这种「图表」连写不是题注引用，跳过 */
+        var pre = m.index > 0 ? joined.charAt(m.index - 1) : '';
+        if (pre === '图' || pre === '表') continue;
+        hits.push(m.index + m[0].indexOf('-'));
+      }
+      if (!hits.length) continue;
+      var touched = false;
+      for (var h = 0; h < hits.length; h++) {
+        var g = hits[h], k = -1;
+        for (var n2 = texts.length - 1; n2 >= 0; n2--) { if (g >= starts[n2]) { k = n2; break; } }
+        if (k < 0) continue;
+        var li = g - starts[k];
+        if (texts[k].charAt(li) !== '-') continue;
+        texts[k] = texts[k].slice(0, li) + '.' + texts[k].slice(li + 1);
+        touched = true; fixed++;
+      }
+      if (!touched) continue;
+      for (var n3 = 0; n3 < nodes.length; n3++) {
+        if ((nodes[n3].textContent || '') !== texts[n3]) nodes[n3].textContent = texts[n3];
+      }
+    }
+    return fixed;
   }
 
   /* ---------- 题注位置规范化（附件8：图题置于图片正下方、表题置于表格正上方） ---------- */
@@ -924,6 +1670,9 @@
     if (wAll(p, 't').length > 0 || wAll(p, 'drawing').length > 0 || wAll(p, 'pict').length > 0) return false;
     if (allByNs(p, 'oMath', M_NS).length > 0) return false;
     if (allByNs(p, 'instrText', W_NS).length > 0) return false;   // 含域指令的段落（旧 TOC 域残留）不算空段
+    /* 含任何域字符（begin/separate/end）的段落也不算空段：旧目录域末尾那个
+       只有 end 的段落会被当成空段「保留一个」，域字符就孤零零留在正文里 */
+    if (wAll(p, 'fldChar').length > 0) return false;
     if (hasPageBreakRun(p)) return false;
     var pPr = childByNs(p, 'pPr', W_NS);
     return !(pPr && childByNs(pPr, 'pageBreakBefore', W_NS));
@@ -1101,6 +1850,94 @@
     return changed;
   }
 
+  /* ---------- 每章末尾补「分节符（下一页）」 ----------
+     目的：让每一章独立成一节，在 Word 里可以逐章单独设置页眉（页眉区会
+     出现「第 N 节」）。Word 的「分节符（下一页）」本身就带分页效果，
+     所以不再叠加分页符——两者叠加会在章节之间多出一张空白页。
+     已有分节符的边界跳过；缺的用一个空段承载分节符，再交给
+     normalizeChapterBreaks 统一压缩上下空行、去掉重复的分页机制。 */
+  function ensureChapterSectionBreaks(doc, body, paras, roles, frontBoundary) {
+    var added = 0, kept = 0, dropped = 0;
+    for (var i = 0; i < paras.length; i++) {
+      var role = roles[i] === 'refHead' ? 'h1' : roles[i];
+      if (role !== 'h1') continue;
+      var head = paras[i].p;
+      if (isFrontElement(head, frontBoundary)) continue;
+
+      var prev = head.previousSibling;
+      while (prev && prev.nodeType !== 1) prev = prev.previousSibling;
+      if (prev && prev.localName === 'sectPr') { kept++; continue; }   // body 级分节符
+
+      /* 往回跨过空段找已有分节符。原文档常见写法：上一节末尾那个空段自带分节符，
+         后面再跟一个空段才是章标题——此时标题其实已经处在新的一节里了，
+         再补一条相邻的分节符会凭空多出一张空白页。遇到正文段落即停，
+         保证只在本节边界范围内查找，不会把上一章的分节符误判成本章的。 */
+      var foundSect = null;
+      for (var back = prev; back; back = back.previousSibling) {
+        if (back.nodeType !== 1) continue;
+        if (back.localName === 'sectPr') { foundSect = back; break; }
+        if (back.localName !== 'p') break;
+        var bPr = childByNs(back, 'pPr', W_NS);
+        if (bPr && childByNs(bPr, 'sectPr', W_NS)) { foundSect = childByNs(bPr, 'sectPr', W_NS); break; }
+        if (!isBlankPara(back)) break;
+      }
+      if (foundSect) {
+        /* 只有「分节符（下一页）」才同时满足分节和换页，直接跳过。
+           oddPage/evenPage 也换页，保留作者的选择。 */
+        var ft = childByNs(foundSect, 'type', W_NS);
+        var ftv = ft ? (ft.getAttributeNS(W_NS, 'val') || '') : '';
+        if (!ftv || ftv === 'nextPage' || ftv === 'oddPage' || ftv === 'evenPage') { kept++; continue; }
+        /* 连续分节符不换页：就地升级成下一页。另补一条会在章前多出一个空节。 */
+        if (ft) ft.setAttributeNS(W_NS, 'w:val', 'nextPage');
+        else {
+          ft = createW(doc, 'type');
+          ft.setAttributeNS(W_NS, 'w:val', 'nextPage');
+          insertInOrder(foundSect, ft, SECTPR_ORDER);
+        }
+        added++;
+        continue;
+      }
+
+      /* 空段作分节符宿主。这里用 isBlankPara 而不是 isEmptySeparatorPara：
+         后者把「带分页符的空段」排除在外，而原文档的章节正是靠这种空段换页的
+         ——另起一个新空段会把它留在上一节末尾，分页符+分节符双重换页出空白页 */
+      var host = (prev && prev.localName === 'p' && isBlankPara(prev)) ? prev : null;
+      if (!host) { host = createW(doc, 'p'); body.insertBefore(host, head); }
+
+      /* 分节符段落属于它前面那一节，所以往后找最近的 sectPr 作为版面蓝本 */
+      var src = null;
+      for (var sib = host.nextSibling; sib; sib = sib.nextSibling) {
+        if (sib.nodeType !== 1) continue;
+        if (sib.localName === 'sectPr') { src = sib; break; }
+        if (sib.localName === 'p') {
+          var spPr = childByNs(sib, 'pPr', W_NS);
+          var sp = spPr && childByNs(spPr, 'sectPr', W_NS);
+          if (sp) { src = sp; break; }
+        }
+      }
+      var sect = src ? src.cloneNode(true) : createW(doc, 'sectPr');
+      /* 页码必须接着上一节编下去：去掉「起始页码」，格式（罗马/阿拉伯）保留 */
+      var pn = childByNs(sect, 'pgNumType', W_NS);
+      if (pn) pn.removeAttributeNS(W_NS, 'w:start');
+
+      var hpPr = childByNs(host, 'pPr', W_NS);
+      if (!hpPr) { hpPr = createW(doc, 'pPr'); host.insertBefore(hpPr, host.firstChild); }
+      var old = childByNs(hpPr, 'sectPr', W_NS);
+      if (old) hpPr.removeChild(old);
+      insertInOrder(hpPr, sect, PPR_ORDER);
+
+      /* 分节符接手换页：去掉这个边界上原有的分页机制（宿主空段自己的、
+         以及上一段末尾的），否则两套换页叠加会在章间多出一张空白页 */
+      dropped += removePageBreaksFrom(host);
+      var tail = host.previousSibling;
+      while (tail && tail.nodeType !== 1) tail = tail.previousSibling;
+      if (tail && tail.localName === 'p' && breakAtParaEnd(tail)) dropped += removePageBreaksFrom(tail);
+
+      added++;
+    }
+    return { added: added, kept: kept, dropped: dropped };
+  }
+
   function normalizeChapterBreaks(doc, paras, roles, frontBoundary) {
     var body = allByNs(doc, 'body', W_NS)[0];
     if (!body) return 0;
@@ -1139,12 +1976,14 @@
     return r;
   }
 
-  /* 构建目录条目段落（toc 样式 + 标题文本 + tab + PAGEREF 页码域） */
-  function buildTocEntryPara(doc, level, text, bookmark) {
+  /* 构建目录条目段落（toc 样式 + 标题文本 + tab + PAGEREF 页码域）。
+     tocIds 为 styles.xml 中实际存在的 toc 样式 id（文档里的 id 常是 6/7/8 之类，
+     硬编码 TOC1 会指向不存在的样式，Word 回落到正文格式） */
+  function buildTocEntryPara(doc, level, text, bookmark, tocIds) {
     var p = createW(doc, 'p');
     var pPr = createW(doc, 'pPr');
     var ps = createW(doc, 'pStyle');
-    ps.setAttributeNS(W_NS, 'w:val', 'TOC' + (level + 1));
+    ps.setAttributeNS(W_NS, 'w:val', (tocIds && tocIds[level + 1]) || ('TOC' + (level + 1)));
     pPr.appendChild(ps);
     var sp = createW(doc, 'spacing');
     sp.setAttributeNS(W_NS, 'w:line', '400');
@@ -1198,7 +2037,7 @@
 
   /* 构建自动目录域 sdt：TOC 指令 + 预填充条目（标题文本 + 页码域），
      打开文档自动更新、可整体选择，格式用修正后的 toc 1/2/3 样式 */
-  function buildTocFieldSdt(doc, headings) {
+  function buildTocFieldSdt(doc, headings, tocIds) {
     var sdt = createW(doc, 'sdt');
     var sdtPr = createW(doc, 'sdtPr');
     var dpo = createW(doc, 'docPartObj');
@@ -1222,7 +2061,7 @@
 
     /* 条目段：标题文本 + tab + PAGEREF 页码域 */
     for (var i = 0; i < headings.length; i++) {
-      content.appendChild(buildTocEntryPara(doc, headings[i].level, headings[i].text, headings[i].bookmark));
+      content.appendChild(buildTocEntryPara(doc, headings[i].level, headings[i].text, headings[i].bookmark, tocIds));
     }
 
     /* 末段：TOC 域结束 */
@@ -1240,7 +2079,7 @@
 
   /* 用自动目录域替换手动目录条目：识别完成后直接生成完整目录
      （预填充条目 + 页码域），并应用之前定好的 toc 格式 */
-  function replaceTocWithField(doc, paras, roles) {
+  function replaceTocWithField(doc, paras, roles, tocIds) {
     var body = allByNs(doc, 'body', W_NS)[0];
     if (!body) return false;
     var tocHeadEl = null, tocEndEl = null;
@@ -1269,7 +2108,9 @@
       var pEl = paras[i2].p;
       if (pEl === tocEndEl) collecting = true;   // 包含 tocEndEl 本身（绪论）
       if (!collecting) continue;
-      var role = roles[i2];
+      /* 参考文献标题的角色是 refHead，但它在版面上与致谢/附录同属一级标题，
+         目录里必须有它（附件8 样张：… 参考文献……50 / 致谢……51 / 附录A …52） */
+      var role = roles[i2] === 'refHead' ? 'h1' : roles[i2];
       var lvl = role === 'h1' ? 0 : role === 'h2' ? 1 : role === 'h3' ? 2 : -1;
       if (lvl < 0) continue;
       var bm = '_Toc' + (headings.length + 1);
@@ -1280,41 +2121,101 @@
 
     /* 删除目录标题后到分节段之间的元素（保留标题后的 1 个空段；
        分节段是目录节末尾与章节换页机制，其后内容（绪论前空段+绪论）不删除） */
-    var keptOne = false;
+    var keptOne = false, fldDepth = 0;
     var cur = tocHeadEl.nextSibling;
     while (cur && cur !== tocEndEl) {
       var nx = cur.nextSibling;
       var isSectP = cur.nodeType === 1 && cur.localName === 'p' &&
                     childByNs(childByNs(cur, 'pPr', W_NS), 'sectPr', W_NS);
-      if (isSectP) break;
+      /* 分节段是目录节的换页机制，要留下；但若此刻正处在旧目录域内部（已经删掉了
+         域的 begin 还没删到 end），说明旧目录被分节段劈成两半，必须继续删下去，
+         否则后半截旧目录留在正文里、域的 end 变成孤儿（Word 会因此吞掉正文） */
+      if (isSectP && fldDepth <= 0) break;
       var isSep = cur.nodeType === 1 && cur.localName === 'p' && isEmptySeparatorPara(cur);
-      if (isSep && !keptOne) { keptOne = true; }
+      if (isSectP) { /* 保留分节段，只把其中的域字符计入深度 */ }
+      else if (isSep && !keptOne) { keptOne = true; }
       else body.removeChild(cur);
+      var fcs = wAll(cur, 'fldChar');
+      for (var f = 0; f < fcs.length; f++) {
+        var ft = fcs[f].getAttributeNS(W_NS, 'fldCharType') || '';
+        if (ft === 'begin') fldDepth++;
+        else if (ft === 'end') fldDepth--;
+      }
       cur = nx;
     }
     /* 插入 TOC 域：位于标题后的空段之后、分节段之前 */
-    var sdt = buildTocFieldSdt(doc, headings);
+    var sdt = buildTocFieldSdt(doc, headings, tocIds);
     var anchor = tocHeadEl.nextSibling;
     var anchorIsSect = anchor && anchor.nodeType === 1 && anchor.localName === 'p' &&
                        childByNs(childByNs(anchor, 'pPr', W_NS), 'sectPr', W_NS);
     body.insertBefore(sdt, anchorIsSect ? anchor : (anchor ? anchor.nextSibling : tocEndEl));
+
+    /* 兜底清理：目录区里还残留的旧目录条目（带 PAGEREF _TocN 域的段落）一并删掉。
+       反复格式化、或输入文档的目录域本来就是坏的（例如半截目录留在正文里）时，
+       这些段落会被当成普通文字排在正文前面，既难看又影响页码 */
+    var c2 = tocHeadEl.nextSibling;
+    while (c2 && c2 !== tocEndEl) {
+      var n2 = c2.nextSibling;
+      if (c2 !== sdt && c2.nodeType === 1) {
+        var ins2 = allByNs(c2, 'instrText', W_NS);
+        for (var q = 0; q < ins2.length; q++) {
+          if (/^\s*PAGEREF\s+"?_Toc\d+/i.test(ins2[q].textContent || '')) { body.removeChild(c2); break; }
+        }
+      }
+      c2 = n2;
+    }
     return true;
   }
 
-  /* 修正 styles.xml 中 toc 1/2/3 样式：小四（12pt）、层级缩进（一级0/二级2字/三级4字），
-     使 Word 自动更新目录后条目格式符合附件8 */
+  /* 修正 / 补建 styles.xml 中 toc 1/2/3 样式：小四（12pt）、层级缩进
+     （一级0/二级2字/三级4字），使 Word 自动更新目录后条目格式符合附件8。
+     返回 {1:id,2:id,3:id}：目录条目 pStyle 必须引用文档里真实存在的样式 id，
+     否则 Word 按正文格式渲染目录（文档中的 toc 样式 id 常为 6/7/8 之类）。 */
   async function ensureTocStyles(zip) {
     var entry = zip.file('word/styles.xml');
-    if (!entry) return;
+    if (!entry) return null;
     var stDoc = new DOMParser().parseFromString(await entry.async('string'), 'application/xml');
-    var targets = { 'toc 1': 0, 'toc 2': 480, 'toc 3': 960 };
     var styles = stDoc.getElementsByTagNameNS(W_NS, 'style');
+    var usedIds = {};
     for (var i = 0; i < styles.length; i++) {
-      var st = styles[i];
-      var nm = childByNs(st, 'name', W_NS);
+      var sid = styles[i].getAttributeNS(W_NS, 'styleId') || '';
+      if (sid) usedIds[sid] = true;
+    }
+    var byLevel = {};
+    for (var j = 0; j < styles.length; j++) {
+      var nm = childByNs(styles[j], 'name', W_NS);
       if (!nm) continue;
-      var name = (nm.getAttributeNS(W_NS, 'val') || '').toLowerCase();
-      if (!(name in targets)) continue;
+      var m = /^(?:toc|目录)\s*([123])$/i.exec((nm.getAttributeNS(W_NS, 'val') || '').trim());
+      if (m && !byLevel[m[1]]) byLevel[m[1]] = styles[j];
+    }
+    /* 缺失的层级补建样式（引用不存在的样式 Word 会回落到正文格式） */
+    for (var lv = 1; lv <= 3; lv++) {
+      if (byLevel[lv]) continue;
+      var newId = 'TOC' + lv, k = 1;
+      while (usedIds[newId]) { k++; newId = 'TOC' + lv + k; }
+      var newSt = createW(stDoc, 'style');
+      newSt.setAttributeNS(W_NS, 'w:type', 'paragraph');
+      newSt.setAttributeNS(W_NS, 'w:styleId', newId);
+      var nEl = createW(stDoc, 'name');
+      nEl.setAttributeNS(W_NS, 'w:val', 'toc ' + lv);
+      newSt.appendChild(nEl);
+      var bo = createW(stDoc, 'basedOn');
+      bo.setAttributeNS(W_NS, 'w:val', 'Normal');
+      newSt.appendChild(bo);
+      var nx = createW(stDoc, 'next');
+      nx.setAttributeNS(W_NS, 'w:val', 'Normal');
+      newSt.appendChild(nx);
+      stDoc.documentElement.appendChild(newSt);
+      usedIds[newId] = true;
+      byLevel[lv] = newSt;
+    }
+
+    var targets = { 1: 0, 2: 480, 3: 960 };
+    var ids = {};
+    for (var L = 1; L <= 3; L++) {
+      var st = byLevel[L];
+      if (!st) continue;
+      ids[L] = st.getAttributeNS(W_NS, 'styleId');
       /* rPr：中文宋体、西文 Times New Roman、小四（sz=24 半磅） */
       var rPr = childByNs(st, 'rPr', W_NS);
       if (!rPr) { rPr = createW(stDoc, 'rPr'); st.appendChild(rPr); }
@@ -1330,18 +2231,19 @@
       if (!szCs0) { szCs0 = createW(stDoc, 'szCs'); rPr.appendChild(szCs0); }
       szCs0.setAttributeNS(W_NS, 'w:val', '24');
       /* pPr：层级缩进（toc1 无缩进 / toc2 2字 / toc3 4字，2字=480 twips） */
-      var left = targets[name];
+      var left = targets[L];
       var pPr = childByNs(st, 'pPr', W_NS);
-      var ind = pPr && childByNs(pPr, 'ind', W_NS);
+      if (!pPr) { pPr = createW(stDoc, 'pPr'); st.insertBefore(pPr, rPr); }
+      var ind = childByNs(pPr, 'ind', W_NS);
       if (left) {
-        if (!pPr) { pPr = createW(stDoc, 'pPr'); st.insertBefore(pPr, rPr); }
         if (!ind) { ind = createW(stDoc, 'ind'); insertInOrder(pPr, ind, PPR_ORDER); }
         ind.setAttributeNS(W_NS, 'w:left', String(left));
       } else if (ind) {
         ind.removeAttributeNS(W_NS, 'w:left');
       }
     }
-    zip.file('word/styles.xml', serialize(stDoc));
+    zip.file('word/styles.xml', serialize(stDoc, 'word/styles.xml'));
+    return ids;
   }
 
   /* ---------- 分节：页边距 / 纸张 / 页码 ---------- */
@@ -1495,7 +2397,7 @@
       var n = 1;
       while (zip.file('word/footer' + n + '.xml')) n++;
       target = 'word/footer' + n + '.xml';
-      var ov = ctDoc.createElement('Override');
+      var ov = ctDoc.createElementNS(CT_NS, 'Override');
       ov.setAttribute('PartName', '/' + target);
       ov.setAttribute('ContentType', CT_FOOTER);
       ctDoc.documentElement.appendChild(ov);
@@ -1503,7 +2405,7 @@
     } else if (!zip.file(target)) {
       zip.file(target, footerXml(s.pageNumber === 'right' ? 'right' : 'center'));
     }
-    zip.file('[Content_Types].xml', serialize(ctDoc));
+    zip.file('[Content_Types].xml', serialize(ctDoc, '[Content_Types].xml'));
 
     // relationships
     var relsEntry = zip.file('word/_rels/document.xml.rels');
@@ -1522,13 +2424,13 @@
     }
     if (!rid) {
       rid = nextRid(relsDoc);
-      var rel = relsDoc.createElement('Relationship');
+      var rel = relsDoc.createElementNS(PKG_REL_NS, 'Relationship');
       rel.setAttribute('Id', rid);
       rel.setAttribute('Type', REL_FOOTER);
-      rel.setAttribute('Target', target);
+      rel.setAttribute('Target', target.replace(/^word\//, '')); // 相对 word/ 解析
       relsDoc.documentElement.appendChild(rel);
     }
-    zip.file('word/_rels/document.xml.rels', serialize(relsDoc));
+    zip.file('word/_rels/document.xml.rels', serialize(relsDoc, 'word/_rels/document.xml.rels'));
     return rid;
   }
 
@@ -1540,12 +2442,227 @@
     return false;
   }
 
+  /* ---------- 页眉：正文起各分节页眉 = 一级标题（章名） ---------- */
+  /* 附件8：页眉为一级标题，五号宋体，页眉之下有一条下划线。
+     用 STYLEREF 域自动取当前页所属章节的标题（改章名后页眉自动跟随，
+     不必逐节写死文字）。前置部分（封面/声明/摘要/目录）的页眉保持原样。 */
+  function escTxt(t) {
+    return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /* STYLEREF 的样式名参数：中文版 Word 只认内置样式的显示名（标题 1），
+     样式名含空格必须加引号，否则 Word 只取到空格前的部分而报「未定义样式」 */
+  function stylerefName(styleName) {
+    var m = /^heading\s*([1-9])$/i.exec(styleName || '');
+    if (m) return '标题 ' + m[1];
+    return styleName || '标题 1';
+  }
+
+  function headerXml(styleName, cachedText) {
+    var f = '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/>' +
+      '<w:sz w:val="21"/><w:szCs w:val="21"/>';
+    var instr = ' STYLEREF "' + styleName + '" \\* MERGEFORMAT ';
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<w:hdr xmlns:w="' + W_NS + '"><w:p><w:pPr>' +
+      '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr>' +
+      '<w:jc w:val="center"/><w:rPr>' + f + '</w:rPr></w:pPr>' +
+      '<w:r><w:rPr>' + f + '</w:rPr><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:rPr>' + f + '</w:rPr><w:instrText xml:space="preserve">' + instr + '</w:instrText></w:r>' +
+      '<w:r><w:rPr>' + f + '</w:rPr><w:fldChar w:fldCharType="separate"/></w:r>' +
+      '<w:r><w:rPr>' + f + '</w:rPr><w:t xml:space="preserve">' + escTxt(cachedText) + '</w:t></w:r>' +
+      '<w:r><w:rPr>' + f + '</w:rPr><w:fldChar w:fldCharType="end"/></w:r>' +
+      '</w:p></w:hdr>';
+  }
+
+  async function addHeaderPart(zip, styleName, cachedText) {
+    var ctDoc = new DOMParser().parseFromString(await zip.file('[Content_Types].xml').async('string'), 'application/xml');
+    var n = 1;
+    while (zip.file('word/header' + n + '.xml')) n++;
+    var target = 'word/header' + n + '.xml';
+    var ov = ctDoc.createElementNS(CT_NS, 'Override');
+    ov.setAttribute('PartName', '/' + target);
+    ov.setAttribute('ContentType', CT_HEADER);
+    ctDoc.documentElement.appendChild(ov);
+    zip.file('[Content_Types].xml', serialize(ctDoc, '[Content_Types].xml'));
+    zip.file(target, headerXml(styleName, cachedText));
+
+    var relsEntry = zip.file('word/_rels/document.xml.rels');
+    var relsDoc;
+    if (relsEntry) {
+      relsDoc = new DOMParser().parseFromString(await relsEntry.async('string'), 'application/xml');
+    } else {
+      relsDoc = new DOMParser().parseFromString(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="' + PKG_REL_NS + '"></Relationships>',
+        'application/xml');
+    }
+    var rid = nextRid(relsDoc);
+    var rel = relsDoc.createElementNS(PKG_REL_NS, 'Relationship');
+    rel.setAttribute('Id', rid);
+    rel.setAttribute('Type', REL_HEADER);
+    /* rsid 目标相对 word/ 解析，必须用文件名而非 word/xxx.xml（否则指向 word/word/xxx.xml） */
+    rel.setAttribute('Target', target.replace(/^word\//, ''));
+    relsDoc.documentElement.appendChild(rel);
+    zip.file('word/_rels/document.xml.rels', serialize(relsDoc, 'word/_rels/document.xml.rels'));
+    return rid;
+  }
+
+  /* 从「第一个一级标题所在分节」起（含该节及之后所有分节）页眉换成取章名的
+     STYLEREF 页眉；前置部分分节（封面/声明/摘要/目录）不动 */
+  async function applyBodyHeaders(zip, doc, paras, roles, frontSectPrs, styleName) {
+    var body = allByNs(doc, 'body', W_NS)[0];
+    if (!body) return false;
+    var firstH1El = null, firstH1Text = '';
+    for (var i = 0; i < roles.length; i++) {
+      if (roles[i] === 'h1') { firstH1El = paras[i].p; firstH1Text = paras[i].text; break; }
+    }
+    if (!firstH1El) return false;
+
+    // 第一个一级标题之后（含其所属分节）出现的所有 sectPr。
+    // 注意不能只用 c === firstH1El 判断：Word 常把目录和正文包在 <w:sdt> 里，
+    // 此时一级标题是 sdtContent 的子节点，body 的直接子节点里根本遇不到它，
+    // seen 永远为 false，正文页眉就一个都设不上（表现为 bodyHeader:false）。
+    function containsNode(anc, node) {
+      for (var x = node; x; x = x.parentNode) if (x === anc) return true;
+      return false;
+    }
+    var sectPrs = [], seen = false;
+    for (var j = 0; j < body.childNodes.length; j++) {
+      var c = body.childNodes[j];
+      if (c.nodeType !== 1) continue;
+      if (!seen && containsNode(c, firstH1El)) seen = true;
+      if (!seen) continue;
+      if (c.localName === 'sectPr') sectPrs.push(c);
+      else if (c.localName === 'p') {
+        var pPr = childByNs(c, 'pPr', W_NS);
+        var sp = pPr && childByNs(pPr, 'sectPr', W_NS);
+        if (sp) sectPrs.push(sp);
+      }
+    }
+    sectPrs = sectPrs.filter(function (s) { return frontSectPrs.indexOf(s) < 0; });
+    if (!sectPrs.length) return false;
+
+    var rid;
+    try { rid = await addHeaderPart(zip, styleName, firstH1Text); } catch (e) { return false; }
+
+    for (var k = 0; k < sectPrs.length; k++) {
+      var olds = wAll(sectPrs[k], 'headerReference');
+      for (var o = olds.length - 1; o >= 0; o--) {
+        if (olds[o].parentNode === sectPrs[k]) sectPrs[k].removeChild(olds[o]);
+      }
+      var hr = createW(doc, 'headerReference');
+      hr.setAttributeNS(W_NS, 'w:type', 'default');
+      hr.setAttributeNS(R_NS, 'r:id', rid);
+      insertInOrder(sectPrs[k], hr, SECTPR_ORDER);
+    }
+    return true;
+  }
+
+  /* 确保一/二/三级标题段落带 Word 标题样式（纯手工加粗的标题在更新目录域后
+     会掉出目录，页眉 STYLEREF 也取不到）。返回「一级标题」样式名。 */
+  async function ensureHeadingStyles(zip, doc, paras, roles) {
+    var entry = zip.file('word/styles.xml');
+    if (!entry) return null;
+    var stDoc = new DOMParser().parseFromString(await entry.async('string'), 'application/xml');
+    var styles = allByNs(stDoc, 'style', W_NS);
+    var byLevel = {}, nameByLevel = {}, used = {}, created = false;
+    for (var i = 0; i < styles.length; i++) {
+      var sid = styles[i].getAttributeNS(W_NS, 'styleId');
+      if (sid) used[sid] = true;
+      var nm = childByNs(styles[i], 'name', W_NS);
+      if (!nm) continue;
+      var name = (nm.getAttributeNS(W_NS, 'val') || '').trim();
+      var m = /^(?:heading|标题)\s*([123])$/i.exec(name);
+      if (!m) continue;
+      var lvl = 'h' + m[1];
+      if (byLevel[lvl]) continue;
+      byLevel[lvl] = sid;
+      nameByLevel[lvl] = name;
+    }
+    /* 缺哪级补哪级。很多文档（WPS 导出、手改过的论文）压根不带「标题 N」样式：
+       而 updateFields 会让 Word 打开时刷新 TOC 域——没有标题样式的段落会被全部
+       踢出目录，目录直接变空；页眉的 STYLEREF 也取不到章名。
+       样式只声明 outlineLvl，字体字号交给段落上的直接格式，避免改版面。 */
+    for (var lv = 1; lv <= 3; lv++) {
+      var key = 'h' + lv;
+      if (byLevel[key]) continue;
+      var newId = 'Heading' + lv, k = 1;
+      while (used[newId]) { k++; newId = 'Heading' + lv + '_' + k; }
+      used[newId] = true;
+      var st = createW(stDoc, 'style');
+      st.setAttributeNS(W_NS, 'w:type', 'paragraph');
+      st.setAttributeNS(W_NS, 'w:styleId', newId);
+      var nEl = createW(stDoc, 'name');
+      nEl.setAttributeNS(W_NS, 'w:val', 'heading ' + lv);
+      st.appendChild(nEl);
+      var bo = createW(stDoc, 'basedOn');
+      bo.setAttributeNS(W_NS, 'w:val', 'Normal');
+      st.appendChild(bo);
+      var nx = createW(stDoc, 'next');
+      nx.setAttributeNS(W_NS, 'w:val', 'Normal');
+      st.appendChild(nx);
+      var spPr = createW(stDoc, 'pPr');
+      var ol = createW(stDoc, 'outlineLvl');
+      ol.setAttributeNS(W_NS, 'w:val', String(lv - 1));
+      spPr.appendChild(ol);
+      st.appendChild(spPr);
+      stDoc.documentElement.appendChild(st);
+      byLevel[key] = newId;
+      nameByLevel[key] = 'heading ' + lv;
+      created = true;
+    }
+    if (created) zip.file('word/styles.xml', serialize(stDoc, 'word/styles.xml'));
+    for (var j = 0; j < paras.length; j++) {
+      /* 参考文献标题归为 refHead，但它与致谢/附录一样是一级标题：
+         没有标题样式时页眉会错显上一章，更新目录也可能掉条目 */
+      var role = roles[j] === 'refHead' ? 'h1' : roles[j];
+      var id = byLevel[role];
+      if (!id) continue;
+      var pEl = paras[j].p;
+      var pPr = childByNs(pEl, 'pPr', W_NS);
+      if (pPr && childByNs(pPr, 'pStyle', W_NS)) continue; // 已有样式，不动
+      if (!pPr) { pPr = createW(doc, 'pPr'); pEl.insertBefore(pPr, pEl.firstChild); }
+      var ps = createW(doc, 'pStyle');
+      ps.setAttributeNS(W_NS, 'w:val', id);
+      pPr.insertBefore(ps, pPr.firstChild);
+    }
+    return nameByLevel.h1;
+  }
+
+  /* 打开文档时自动更新域（目录页码首次打开即刷新）：
+     在 word/settings.xml 写入 <w:updateFields w:val="true"/>。
+     schema 顺序中 updateFields 位于 <w:compat> 之前。 */
+  async function enableUpdateFields(zip) {
+    var entry = zip.file('word/settings.xml');
+    if (!entry) return false;
+    var xml = await entry.async('string');
+    if (/<w:updateFields/.test(xml)) return true;
+    var tag = '<w:updateFields w:val="true"/>';
+    if (xml.indexOf('<w:compat') >= 0) xml = xml.replace('<w:compat', tag + '<w:compat');
+    else if (xml.indexOf('<w:rsids') >= 0) xml = xml.replace('<w:rsids', tag + '<w:rsids');
+    else xml = xml.replace('</w:settings>', tag + '</w:settings>');
+    zip.file('word/settings.xml', xml);
+    return true;
+  }
+
+  /* ---------- 导出文件名 ----------
+     原名（去掉扩展名）+ 工具版本号：CYX_毕业设计.docx → CYX_毕业设计_v1.6.5.docx。
+     只加版本号，不再缀「_格式化」——名字短，也一眼能看出是哪一版跑出来的。
+     拿已经带版本号的文件再跑一遍时先去掉旧后缀，免得越拼越长
+     （CYX_毕业设计_v1.6.2_v1.6.5.docx）；浏览器重名副本的「 (1)」也一并去掉。
+     注意只认「_v数字」这种本工具写的后缀：原作者自己的 CYX_3.0.docx 不能动。 */
+  function outputName(fileName) {
+    var base = String(fileName || '论文').replace(/\.docx$/i, '');
+    base = base.replace(/\s*\(\d+\)$/, '').replace(/[_\-\s]+v\d+(?:\.\d+)*$/i, '');
+    return (base || '论文') + '_v' + (FormatTool.VERSION || '0') + '.docx';
+  }
+
   /* ---------- 主入口 ---------- */
   async function formatDocx(data, settings, opts) {
     opts = opts || {};
     settings = Object.assign({}, DEFAULTS, settings || {});
     if (typeof JSZip === 'undefined') throw new Error('缺少 JSZip 库');
     if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') throw new Error('当前环境缺少 DOMParser / XMLSerializer');
+    emptyNsNodes = []; // 每次格式化重新统计空命名空间节点
 
     var zip = await JSZip.loadAsync(data);
     var entry = zip.file('word/document.xml');
@@ -1560,6 +2677,10 @@
     var paras = collectParas(doc);
     var cls = classifyParas(paras);
 
+    /* 一级标题改「1 绪论」体例（第1章 → 1；附录不编序号、图用图A1）。
+       放在最前面：后面几道工序（删中西文空格、真题注）都在看最终文字 */
+    if (settings.chapterNumber) cls.counts.renamedChapter = rewriteChapterHeadings(paras, cls.roles);
+
     /* 前置部分边界：第一个非 front 角色段落（通常即摘要标题）之前的
        元素一律不做任何修改；用元素引用作边界（normalize 会增删元素导致索引漂移） */
     var frontBoundary = null;
@@ -1569,14 +2690,48 @@
       break;
     }
     var frontSectPrs = collectFrontSectPrs(doc, frontBoundary);
+    var bodyEl = allByNs(doc, 'body', W_NS)[0];
 
     applyFormatting(doc, paras, cls.roles, settings);
+
+    /* 清除「突出显示」底色：论文不应带灰底/彩底标记 */
+    if (settings.clearHighlight) cls.counts.clearedHighlight = clearHighlights(doc);
+
+    /* 页眉/页脚页码域前的孤儿标点（页脚上的「、33」）。
+       这是缺陷不是体例偏好，无条件清理，不给开关。 */
+    try { cls.counts.strayPunctRemoved = await cleanFooterStrayPunct(zip); }
+    catch (e) { cls.counts.strayPunctRemoved = 0; }
+
+    /* 删除中西文之间的空格（标题/题注段首编号后的间隔保留） */
+    if (settings.cjkSpace) cls.counts.joinedCjk = removeCjkLatinSpaces(doc, paras, cls.roles);
+
+    /* 图片题注改用 Word 真题注（题注样式 + SEQ 域） */
+    if (settings.wordCaption) {
+      var capSt = buildStyles(settings).caption;
+      var capStyleId = null;
+      try { capStyleId = await ensureCaptionStyle(zip); } catch (e) { capStyleId = null; }
+      var capRes = applyWordCaptions(doc, bodyEl, paras, cls.roles, frontBoundary, capSt, capStyleId);
+      cls.counts.wordCaption = capRes.done;
+      cls.counts.captionPlaceholder = capRes.placeholders;
+      /* 图题改成「图4.1」后，正文里的「如图4-1所示」同步改，否则引用对不上 */
+      cls.counts.figureRefFixed = normalizeFigureRefs(paras, cls.roles);
+    }
+
+    /* 每章末尾补「分节符（下一页）」，便于逐章单独设置页眉 */
+    if (settings.chapterSection) {
+      var secRes = ensureChapterSectionBreaks(doc, bodyEl, paras, cls.roles, frontBoundary);
+      cls.counts.sectionAdded = secRes.added;
+      cls.counts.sectionKept = secRes.kept;
+      cls.counts.sectionBreakDropped = secRes.dropped;
+    }
+
     if (settings.chapterPageBreak) normalizeChapterBreaks(doc, paras, cls.roles, frontBoundary); // 章节换页规整化（防空白页/空行被吞）
     if (settings.autoToc) {
-      replaceTocWithField(doc, paras, cls.roles);   // 目录替换为自动目录域（可整体选择、可更新）
-      await ensureTocStyles(zip);                   // 修正 toc 1/2/3 样式（小四+层级缩进）
+      // 先修正/补建 toc 1/2/3 样式并取回真实样式 id，目录条目才能引用到它们
+      var tocIds = null;
+      try { tocIds = await ensureTocStyles(zip); } catch (e) { tocIds = null; }
+      replaceTocWithField(doc, paras, cls.roles, tocIds); // 目录替换为自动目录域（可整体选择、可更新）
     }
-    // 页眉保持输入原样，不做任何修改
     repositionCaptions(doc, frontBoundary); // 图题移到图片正下方、表题移到表格正上方
     singleSpaceImageParas(doc, frontBoundary); // 含图片的段落行距改单倍，避免图片被固定行距截断
 
@@ -1597,21 +2752,44 @@
     setSections(doc, settings, footerRid, frontSectPrs);
     if (settings.pageNumberSplit) applyPageNumbering(doc, paras, cls.roles, settings, frontSectPrs);
 
-    zip.file('word/document.xml', serialize(doc));
+    /* 标题样式兜底：更新目录域、页眉 STYLEREF 都依赖「标题 N」样式 */
+    var h1StyleName = null;
+    try { h1StyleName = await ensureHeadingStyles(zip, doc, paras, cls.roles); } catch (e) { h1StyleName = null; }
+    // 页眉：正文起各分节页眉 = 一级标题（章名）；前置部分页眉保持输入原样
+    var headerSet = false;
+    if (settings.bodyHeader && h1StyleName) {
+      try {
+        headerSet = await applyBodyHeaders(zip, doc, paras, cls.roles, frontSectPrs,
+          stylerefName(settings.headerStyleName || h1StyleName));
+      } catch (e) { headerSet = false; }
+    }
+    // 打开文档时自动更新域（目录页码/页眉章名首次打开即刷新）
+    if (settings.updateFields) { try { await enableUpdateFields(zip); } catch (e) { /* ignore */ } }
+
+    /* 导出前兜底：域字符必须配平，否则 Word 更新域时会吞掉正文 */
+    var fieldsFixed = repairFields(doc);
+
+    zip.file('word/document.xml', serialize(doc, 'word/document.xml'));
 
     var counts = cls.counts;
+    /* 空命名空间节点：非 0 说明某个部件里有「无命名空间」元素，Word 会认成损坏 */
+    counts.emptyNsNodes = emptyNsNodes.length;
+    if (emptyNsNodes.length) console.warn('[格式助手] 序列化出现空命名空间节点，Word 可能报文件损坏：', emptyNsNodes.join(', '));
     counts.tables = wAll(doc, 'tbl').length;
     counts.formulas = allByNs(doc, 'oMath', M_NS).length;
     counts.images = Object.keys(zip.files).filter(function (f) { return /^word\/media\//.test(f); }).length;
     counts.paras = paras.length;
+    counts.fieldsFixed = fieldsFixed;
     counts.footerAdded = !!footerRid;
+    counts.bodyHeader = headerSet;
 
     var type = opts.format === 'nodebuffer' ? 'nodebuffer' : 'blob';
     var out = await zip.generateAsync({ type: type, mimeType: MIME_DOCX, compression: 'DEFLATE' });
     return { data: out, counts: counts, info: cls.info, settings: settings };
   }
 
-  var FormatTool = { VERSION: '1.0.0', DEFAULTS: DEFAULTS, formatDocx: formatDocx, classifyParas: classifyParas };
+  var FormatTool = { VERSION: '1.6.5', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
+    classifyParas: classifyParas, outputName: outputName };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = FormatTool;
   else global.FormatTool = FormatTool;
