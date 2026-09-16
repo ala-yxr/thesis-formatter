@@ -37,10 +37,20 @@ if (!browser) {
   process.exit(1);
 }
 
-const candidates = ['CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx',
+/* 夹具查找：先认历史名单，名单落空再扫根目录里版本号最大的 CYX_<n>.<n>.docx。
+   作者每改一版论文，文件名就跟着变（CYX_20.0 → CYX_21.0）。只认死名单的话，
+   他一改名整套测试就静悄悄地不跑了 —— 2026-09-16 就踩到：名单停在 CYX_20.0，
+   根目录里其实已经是 CYX_21.0。 */
+function findFixture(names) {
+  const hit = names.map((n) => path.join(ROOT, n)).find((f) => fs.existsSync(f));
+  if (hit) return hit;
+  const ver = (n) => { const m = /^CYX_(\d+)\.(\d+)\.docx$/.exec(n); return m ? +m[1] * 1000 + +m[2] : -1; };
+  const best = fs.readdirSync(ROOT).filter((n) => ver(n) >= 0).sort((a, b) => ver(b) - ver(a))[0];
+  return best ? path.join(ROOT, best) : null;
+}
+const fixture = findFixture(['CYX_21.0.docx', 'CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx',
   'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx',
-  'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx', '1.docx'];
-const fixture = candidates.map((n) => path.resolve(ROOT, n)).find((f) => fs.existsSync(f));
+  'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx', '1.docx']);
 if (!fixture) {
   console.error('未找到测试文档，请将论文放在 ' + ROOT + ' 下');
   process.exit(1);

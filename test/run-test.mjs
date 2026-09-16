@@ -16,13 +16,22 @@ const FormatTool = (await import('../js/formatter.js')).default;
 const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcCandidates = ['CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx', 'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx', 'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx']
-  .map(n => path.resolve(__dirname, '../../' + n))
-  .find(f => fs.existsSync(f));
-const src = srcCandidates || path.resolve(__dirname, '../../CYX_毕业设计.docx');
+const ROOT = path.resolve(__dirname, '../..');
+/* 夹具查找：先认历史名单，名单落空再扫根目录里版本号最大的 CYX_<n>.<n>.docx。
+   作者每改一版论文，文件名就跟着变（CYX_20.0 → CYX_21.0）。只认死名单的话，
+   他一改名整套回归测试就静悄悄地不跑了 —— 2026-09-16 就踩到：名单停在
+   CYX_20.0，根目录里其实已经是 CYX_21.0。 */
+function findFixture(names) {
+  const hit = names.map((n) => path.join(ROOT, n)).find((f) => fs.existsSync(f));
+  if (hit) return hit;
+  const ver = (n) => { const m = /^CYX_(\d+)\.(\d+)\.docx$/.exec(n); return m ? +m[1] * 1000 + +m[2] : -1; };
+  const best = fs.readdirSync(ROOT).filter((n) => ver(n) >= 0).sort((a, b) => ver(b) - ver(a))[0];
+  return best ? path.join(ROOT, best) : null;
+}
+const src = findFixture(['CYX_21.0.docx', 'CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx', 'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx', 'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx']);
 const outFile = path.join(__dirname, 'output_格式化.docx');
 
-if (!srcCandidates) {
+if (!src) {
   console.error('未找到测试文档，请将论文放在项目根目录下（如 CYX_3.0.docx / CYX_毕业设计.docx）');
   process.exit(1);
 }
@@ -879,6 +888,86 @@ console.log(`✓ 孤儿域字符修复: 输入含无 begin 的 end → 输出 be
   `收尾深度=${orphanStats.depth}（fieldsFixed=${orphanOut.counts.fieldsFixed}）`);
 if (!balanced(orphanStats) || orphanOut.counts.fieldsFixed < 1) {
   throw new Error('输入文档里的孤儿域字符没有被修掉');
+}
+
+// 23. 三级标题「编号与文字之间没有空格」必须照样认成标题、并把空格补上。
+//     2026-09-16 曾鹏的 2.docx 第 3 章 9 个三级标题全写成「3.1.1系统目标」，
+//     而 RE.h3 当时要求编号后必须有空白，h2 又因 (?![\d.]) 撞上第二个小数点，
+//     于是整段掉进 body：宋体小四、两端对齐、缩进 480 —— 标题的字体字号对齐缩进
+//     四处全丢。同时补空格也不能误伤：本来就有空格的不许补成两个，正文里指代
+//     章节的「1.2.3节」不许动，带小数点的长句不许被当成标题。
+function buildH3TestDocx() {
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const P = (t) => `<w:p><w:r><w:t>${esc(t)}</w:t></w:r></w:p>`;
+  const body = P('摘  要') + P('本文研究转台控制精度问题。') + P('关键词：转台；控制') +
+    P('第1章 绪论') + P('1.1 研究背景') +
+    P('1.1.1 研究背景与意义') +          // 本来就有空格：不许补成两个
+    P('1.1.2国内外研究现状') +           // 缺空格：要补成「1.1.2 国内外研究现状」
+    P('这是正文段落，1.2.3节给出了详细说明。') +   // 正文里的指代：一个字都不许动
+    // 长句：不许当标题。这句必须超过 40 字 —— 二/三级标题判定有一条 tx.length <= 40
+    // 的长度守卫，夹具写短了就测不到守卫本身（第一版夹具 38 字，被判成二级标题，
+    // 是夹具的问题不是代码的问题）。带小数点的短句仍会被当成 h2，那是 h2 规则早就
+    // 有的行为（RE.h2 一直是 \s*），不在本次改动范围内。
+    P('1.5倍车速下的制动距离与理论计算值存在明显偏差，需要进一步分析其中的原因所在，以便对制动模型进行修正。') +
+    P('第3章 系统设计') +
+    P('3.1.1系统目标') +                 // 缺空格：要补
+    P('3.1.2用户角色分析') +              // 缺空格：要补
+    P('3.1.3 已带空格的三级标题') +        // 本来就有空格：不许补成两个
+    P('参考文献') + P('[1] 孙家广.计算机图形学[M].北京:清华大学出版社,1995:15-18.');
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="' + W + '"><w:body>' + body +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'nodebuffer' });
+}
+/* 逐段取出：文字 + 段落里所有 run 的字号/中文字体。
+   三级标题是黑体四号（sz=28），正文是宋体小四（sz=24）——
+   两者分得开，就说明这段确实按标题排了，没有掉进 body */
+async function paraStylesOf(buf) {
+  const z = await JSZip.loadAsync(buf);
+  const d = new DOMParser().parseFromString(await z.file('word/document.xml').async('string'), 'application/xml');
+  const b = d.getElementsByTagNameNS(W_NS, 'body')[0];
+  return Array.from(b.childNodes).filter(n => n.nodeType === 1 && n.localName === 'p').map(p => {
+    const szs = new Set(), fonts = new Set();
+    Array.from(p.getElementsByTagNameNS(W_NS, 'sz')).forEach(s => szs.add(s.getAttributeNS(W_NS, 'val')));
+    Array.from(p.getElementsByTagNameNS(W_NS, 'rFonts')).forEach(f => {
+      const e = f.getAttributeNS(W_NS, 'eastAsia');
+      if (e) fonts.add(e);
+    });
+    return {
+      text: Array.from(p.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('').trim(),
+      szs: szs, fonts: fonts,
+    };
+  }).filter(x => x.text);
+}
+const h3Out = await paraStylesOf((await FormatTool.formatDocx(await buildH3TestDocx(), FormatTool.DEFAULTS, { format: 'nodebuffer' })).data);
+const txt = h3Out.map(x => x.text);
+const byTxt = (t) => h3Out.find(x => x.text === t);
+/* 是标题还是正文，用字体字号判：黑体 sz28 = 三级标题，宋体 sz24 = 正文 */
+const isH3 = (t) => { const x = byTxt(t); return !!x && x.szs.has('28') && !x.szs.has('24') && x.fonts.has('黑体'); };
+const isBody = (t) => { const x = byTxt(t); return !!x && x.szs.has('24') && !x.szs.has('28') && x.fonts.has('宋体'); };
+
+const h3SpaceOk =
+  txt.includes('1.1.2 国内外研究现状') && txt.includes('3.1.1 系统目标') && txt.includes('3.1.2 用户角色分析') &&
+  !txt.includes('1.1.2国内外研究现状') && !txt.includes('3.1.1系统目标') && !txt.includes('3.1.2用户角色分析');
+const h3DoubleOk =                                // 已有空格的不许补成两个
+  txt.includes('1.1.1 研究背景与意义') && txt.includes('3.1.3 已带空格的三级标题') &&
+  !txt.some(t => /^\d+\.\d+\.\d+\s\s/.test(t));
+const h3RoleOk =                                  // 补过空格的和本来就有空格的，都要按三级标题排版
+  ['1.1.1 研究背景与意义', '1.1.2 国内外研究现状', '3.1.1 系统目标', '3.1.2 用户角色分析', '3.1.3 已带空格的三级标题'].every(isH3);
+const bodyCiteOk = isBody('这是正文段落，1.2.3节给出了详细说明。') &&      // 正文里的指代：不动、排版也不动
+  txt.includes('这是正文段落，1.2.3节给出了详细说明。');
+const bodyLongOk = isBody('1.5倍车速下的制动距离与理论计算值存在明显偏差，需要进一步分析其中的原因所在，以便对制动模型进行修正。');
+const h3BodyOk = bodyCiteOk && bodyLongOk;        // 正文不被牵连
+
+console.log(`✓ 三级标题缺空格: 补空格=${h3SpaceOk} | 不补成两个=${h3DoubleOk} | 按标题排版=${h3RoleOk} | ` +
+  `正文指代不动=${bodyCiteOk} | 正文长句不当标题=${bodyLongOk}`);
+console.log(`  标题判定: ${txt.filter(t => /^\d+\.\d+\.\d+/.test(t)).map(t => t + (isH3(t) ? '[标题]' : '[正文✗]')).join(' | ')}`);
+if (!h3SpaceOk || !h3DoubleOk || !h3RoleOk || !h3BodyOk) {
+  throw new Error('三级标题（编号后无空格）未被正确识别 / 补空格有误');
 }
 
 console.log('\n全部校验通过 ✔');

@@ -66,7 +66,7 @@
     pageNumberSplit: true,         // 前置部分罗马数字、主体阿拉伯数字单独编页
     threeLineTable: true,          // 表格仅保留顶线/底线 1.5 磅，清除其余所有线条
     chapterPageBreak: true,        // 一级标题之间换页
-    chapterNumber: true,           // 一级标题改「1 绪论」体例（「第1章 绪论」→「1 绪论」）
+    chapterNumber: true,           // 标题编号体例（「第1章 绪论」→「1 绪论」；「3.1.1系统目标」→「3.1.1 系统目标」）
     autoToc: true,                 // 目录替换为 Word 自动目录域（可整体选择、可更新）
     bodyHeader: true,              // 正文及各后置分节页眉 = 一级标题（章名，STYLEREF 域）
     updateFields: true,            // 打开文档时自动更新域（目录页码自动刷新）
@@ -89,7 +89,13 @@
     h1Word: /^(绪\s*论|引\s*言|前\s*言|结\s*论|总\s*结|结\s*论\s*与\s*展\s*望)/,
     /* 编号首位禁止 0：正文里的十进制小数（如「0.96英寸…」）会误命中编号规则 */
     h1Alt:  /^[1-9]\d?\s+[^\d.\s]/,
-    h3:     /^[1-9]\d?\.\d{1,2}\.\d{1,2}\s/,
+    /* 三级标题：编号与标题之间**允许没有空格**（「3.1.1系统目标」同样是标题）。
+       这里原先是 \s（必须有空格），与下面 h2 的 \s* 不一致 —— 于是「3.1.1系统目标」
+       这种写法 h3 不命中、h2 又因 (?![\d.]) 撞上第二个小数点而不命中，整段掉进
+       body：宋体小四、两端对齐、缩进 480，三级标题的格式全丢。
+       2026-09-16 曾鹏的 2.docx 第3章 9 个三级标题就是这么被排成正文的。
+       (?![\d.]) 是别让「1.1.1.1」这类四级编号的前缀被认成三级标题。 */
+    h3:     /^[1-9]\d?\.\d{1,2}\.\d{1,2}(?![\d.])\s*[^\d.]/,
     h2:     /^[1-9]\d?\.\d{1,2}(?![\d.])\s*[^\d.]/,
     h2cn:   /^[一二三四五六七八九十]{1,3}[、.]/,
     /* 附录内小节：A.1 / B.2.1（附件8：附录中的图、表、式另行编号，与正文分开） */
@@ -1225,6 +1231,8 @@
      不写「第1章 绪论」。只动标题段与目录里的对应条目；正文里指代章节的
      「第5章」保持不动——那是叙述不是标题（「数据生成规则将在第5章如实给出」），
      改了反而不通顺。
+     三级标题同一句话的另一半：附件8 要求「数字与文字间隔一字符」，
+     「3.1.1系统目标」要补成「3.1.1 系统目标」（只补空格，编号一个字符不改）。
      附录：附件8「附录如果为多个附件，依序用附录A、附录B、附录C……编序号，
      否则只用『附录』」，所以单个附录去掉序号（附录1 → 附录）、多个附录依序
      给字母（附录1 / 附录2 → 附录A / 附录B）；附录里的图表随之用字母编号
@@ -1298,7 +1306,7 @@
     var changed = 0, tocAppSeen = 0;
     for (var i = 0; i < paras.length; i++) {
       var role = roles[i];
-      if (role !== 'h1' && role !== 'tocItem') continue;
+      if (role !== 'h1' && role !== 'h3' && role !== 'tocItem') continue;
       var live = paraText(paras[i].p);
       var lead = live.length - live.replace(/^\s+/, '').length;   // 段首空格不参与匹配
       var head = live.slice(lead);
@@ -1322,6 +1330,14 @@
         if (!ma) continue;
         n = ma[0].length;
         newText = (head.slice(n) ? '附录' + letter + ' ' : '附录' + letter);
+      } else if (role === 'h3') {
+        /* 「3.1.1系统目标」→「3.1.1 系统目标」：附件8 要求编号与文字间隔一字符。
+           三级标题的识别已经允许编号后不带空格（见 RE.h3），这里只把缺的那个空格补上。
+           本来就有空格的（「3.5.1 技术可行性」）直接跳过，免得补成两个空格。 */
+        var m3 = /^[1-9]\d?\.\d{1,2}\.\d{1,2}(?![\d.])/.exec(head);
+        if (!m3 || /^\s/.test(head.slice(m3[0].length))) continue;
+        n = m3[0].length;
+        newText = m3[0] + ' ';
       }
       if (!newText) continue;
       var result = newText + head.slice(n);
@@ -2788,7 +2804,7 @@
     return { data: out, counts: counts, info: cls.info, settings: settings };
   }
 
-  var FormatTool = { VERSION: '1.6.5', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
+  var FormatTool = { VERSION: '1.6.6', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
     classifyParas: classifyParas, outputName: outputName };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = FormatTool;
