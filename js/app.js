@@ -78,6 +78,9 @@
     previewEmpty: $('#previewEmpty'), previewFrame: $('#previewFrame'), previewStatus: $('#previewStatus'),
     toast: $('#toast'), overlay: $('#overlay'), overlayText: $('#overlayText'),
     btnAddSchool: $('#btnAddSchool'), btnDelSchool: $('#btnDelSchool'), fileSchool: $('#fileSchool'),
+    chkTemplateFront: $('#templateFront'), btnPickTemplate: $('#btnPickTemplate'),
+    btnClearTemplate: $('#btnClearTemplate'), fileTemplate: $('#fileTemplate'),
+    templateStatus: $('#templateStatus'),
     addSchoolModal: $('#addSchoolModal'), schoolNameInput: $('#schoolNameInput'),
     schoolDocName: $('#schoolDocName'), btnAddSchoolConfirm: $('#btnAddSchoolConfirm'),
     btnAddSchoolCancel: $('#btnAddSchoolCancel'),
@@ -352,6 +355,8 @@
     if (!info.titleDetected) notes.push('未识别到独立论文题目行（摘要页可能不含题目），题目格式未套用。');
     if (!info.chapterStyle) notes.push('章节采用「1 绪论」式编号，已按一级标题处理。');
     if (counts.footerAdded) notes.push('已添加页码（封面首页不显示）。');
+    if (counts.frontMatter) notes.push('已套用模板前置页：封面与声明页共 ' + counts.frontMatter + ' 个元素照搬自模板，本文档原封面区已替换。');
+    if (counts.frontIgnoredHf && counts.frontIgnoredHf.length) notes.push('模板前置页的' + counts.frontIgnoredHf.join('、') + '未搬运（封面与声明页不编页码、不印页眉）。');
     if (counts.formula > 0) notes.push('检测到 ' + counts.formula + ' 处公式：原样保留不改动，预览中可能显示不完整，以 Word 为准。');
     S.statsNotes.innerHTML = notes.map((n) => `<span class="note">${n}</span>`).join('');
   }
@@ -446,13 +451,86 @@
     }
   }
 
+  /* ---------- 模板前置页（封面 / 声明页照搬） ----------
+   * 模板解析成 { name, front, on } 存 localStorage —— 含图片 base64（校徽一张
+   * 一百多 KB），所以存不下时要明确告诉用户「本次能用，下次要重选」，不能装作存住了。
+   * 不分学科：一个学生的封面就一份，工科文科共用。 */
+  const LS_TPL_KEY = 'thesis-formatter-front-template';
+  let templateCache = null;
+
+  function loadTemplate() {
+    try { return JSON.parse(localStorage.getItem(LS_TPL_KEY)) || null; }
+    catch (e) { return null; }
+  }
+  function saveTemplate() {
+    try {
+      if (templateCache) localStorage.setItem(LS_TPL_KEY, JSON.stringify(templateCache));
+      else localStorage.removeItem(LS_TPL_KEY);
+    } catch (e) {
+      toast('模板较大，浏览器存不下：本次仍可用，下次打开需要重新选择', true);
+    }
+  }
+  function renderTemplateStatus() {
+    const f = templateCache && templateCache.front;
+    S.chkTemplateFront.disabled = !f;
+    S.btnClearTemplate.hidden = !f;
+    if (!f) {
+      S.chkTemplateFront.checked = false;
+      S.templateStatus.textContent = '尚未选择模板文档';
+      return;
+    }
+    S.chkTemplateFront.checked = !!templateCache.on;
+    const img = (f.media || []).length;
+    S.templateStatus.textContent = '已记住「' + templateCache.name + '」：前置页 ' + f.els +
+      ' 个元素' + (img ? '、' + img + ' 张图片' : '') + '（到「' + (f.boundary || '摘要') + '」为止）';
+  }
+  function bindTemplateFront() {
+    S.btnPickTemplate.addEventListener('click', () => S.fileTemplate.click());
+    S.fileTemplate.addEventListener('change', async () => {
+      const f = S.fileTemplate.files[0];
+      S.fileTemplate.value = '';
+      if (!f) return;
+      if (!/\.docx$/i.test(f.name)) { toast('模板需为 Word 文档（.docx）', true); return; }
+      showOverlay('正在读取模板「' + f.name + '」…');
+      try {
+        const front = await FormatTool.extractFrontMatter(await f.arrayBuffer());
+        templateCache = { name: f.name, front: front, on: true };
+        saveTemplate();
+        renderTemplateStatus();
+        hideOverlay();
+        const ig = front.ignoredParts || [];
+        toast('模板前置页已记住 ✔' + (ig.length
+          ? '（模板的' + ig.join('、') + '有内容，前置页不搬页眉页脚，已忽略）' : ''));
+      } catch (e) {
+        hideOverlay();
+        toast(e.message || '模板读取失败，可能不是标准 .docx', true);
+      }
+    });
+    S.chkTemplateFront.addEventListener('change', () => {
+      if (!templateCache) return;
+      templateCache.on = S.chkTemplateFront.checked;
+      saveTemplate();
+      renderTemplateStatus();
+    });
+    S.btnClearTemplate.addEventListener('click', () => {
+      templateCache = null;
+      saveTemplate();
+      renderTemplateStatus();
+      toast('已清除模板前置页');
+    });
+  }
+
   /* ---------- 格式化主流程 ---------- */
   async function formatFile(file) {
     showOverlay('正在格式化「' + file.name + '」…');
     try {
       const arrayBuffer = await file.arrayBuffer();
       const settings = currentSettings();
-      const result = await FormatTool.formatDocx(arrayBuffer, settings, { format: 'blob' });
+      const opts = { format: 'blob' };
+      if (templateCache && templateCache.on && templateCache.front) {
+        opts.templateFront = templateCache.front;
+      }
+      const result = await FormatTool.formatDocx(arrayBuffer, settings, opts);
       lastBlob = result.data;
       lastFile = file;
 
@@ -554,7 +632,10 @@
   migrateLegacy();
   bind();
   bindAddSchool();
+  bindTemplateFront();
   bindGate();
+  templateCache = loadTemplate();   // 记忆的模板与学科无关，进来就恢复
+  renderTemplateStatus();
   updateModeBadge();
   showGate();
   if (typeof FormatTool === 'undefined') {

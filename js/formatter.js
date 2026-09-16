@@ -24,6 +24,15 @@
   var REL_FOOTER = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer';
   var CT_HEADER = 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml';
   var REL_HEADER = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header';
+  var REL_IMAGE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image';
+  /* 套用模板前置页时会遇到的图形命名空间：
+     DrawingML（a:blip，现代图片）与 VML（v:imagedata，老式图片） */
+  var A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  var V_NS = 'urn:schemas-microsoft-com:vml';
+  var XMLNS_NS = 'http://www.w3.org/2000/xmlns/';
+  /* 图片扩展名 → Content-Type（搬图片时若模板用了目标文档没声明过的格式，要补 Default） */
+  var IMG_CT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', emf: 'image/x-emf', wmf: 'image/x-wmf' };
   var MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
   /* ---------- 默认设置（重庆工程学院本科毕业设计（论文）撰写格式要求，附件8） ---------- */
@@ -2528,9 +2537,13 @@
     return rid;
   }
 
-  function hasFooterRef(doc) {
+  /* skip 里的分节不算数：套用模板前置页时，封面那一节自带学校的页脚
+     （通常是空的，但不排除有内容）。把它算进来的话，正文就以为「已经有页脚了」，
+     于是不再创建页码页脚 —— 整篇正文一页页码都没有。 */
+  function hasFooterRef(doc, skip) {
     var sps = allByNs(doc, 'sectPr', W_NS);
     for (var i = 0; i < sps.length; i++) {
+      if (skip && skip.indexOf(sps[i]) >= 0) continue;
       if (wAll(sps[i], 'footerReference').length > 0) return true;
     }
     return false;
@@ -2750,6 +2763,318 @@
     return (base || '论文') + '_v' + (FormatTool.VERSION || '0') + '.docx';
   }
 
+  /* ---------- 套用模板前置页 ----------
+     把另一份 docx（学校给的范本，或已经排好版的样张）的封面与原创性声明
+     整段搬到本文档最前面，替换掉本文档自己的封面区。
+
+     为什么要有这个：学校模板的封面是手工排出来的 —— 校徽图片、字段表格、
+     填写用的下划线，都是一处处调出来的，重打一遍必然走样，整段搬才忠实。
+
+     界桩取「摘要」标题。附件8 的论文一律是「封面 → 声明 → 摘要 → 正文」，
+     这个位置比数页数可靠。搬过来之后不用另外管页面设置和页码：前置页最后
+     那个段落自带 sectPr，它落在 frontBoundary 之前，collectFrontSectPrs
+     会把它认成前置部分 —— 页面设置不动、不编页码（附件8：封面不编页码）。
+
+     要搬三样：前置页的段落与表格、它引用的图片、它的命名空间声明。
+     页眉页脚按内容决定：空的丢掉（搬过去只会和「页眉显示章名」打架，
+     实测附件8 范本的封面页眉页脚就是空的），有内容的照搬 —— 学校的页眉
+     不能静默丢掉。 */
+
+  /** 关系表：Id → { type, target, mode } */
+  function relInfoOf(relsDoc) {
+    var out = {};
+    var rs = relsDoc.getElementsByTagName('Relationship');
+    for (var i = 0; i < rs.length; i++) {
+      out[rs[i].getAttribute('Id')] = {
+        type: rs[i].getAttribute('Type') || '',
+        target: rs[i].getAttribute('Target') || '',
+        mode: rs[i].getAttribute('TargetMode') || ''
+      };
+    }
+    return out;
+  }
+
+  /** 部件名归一：Target 可能写成 media/x.png、/word/media/x.png 或 ../media/x */
+  function partPath(target) {
+    var t = String(target || '').replace(/^\.\//, '').replace(/^\/+/, '');
+    if (t.indexOf('word/') === 0) return t;
+    return 'word/' + t.replace(/^(\.\.\/)+/, '');
+  }
+
+  /** 一个段落/表格里引用到的 rId（图片用 a:blip / v:imagedata，页眉页脚用 *Reference） */
+  function refRidsIn(el) {
+    var out = [];
+    var blips = allByNs(el, 'blip', A_NS);
+    for (var i = 0; i < blips.length; i++) {
+      var e = blips[i].getAttributeNS(R_NS, 'embed') || blips[i].getAttributeNS(R_NS, 'link');
+      if (e && out.indexOf(e) < 0) out.push(e);
+    }
+    var vml = allByNs(el, 'imagedata', V_NS);
+    for (var j = 0; j < vml.length; j++) {
+      var v = vml[j].getAttributeNS(R_NS, 'id');
+      if (v && out.indexOf(v) < 0) out.push(v);
+    }
+    return out;
+  }
+
+  function hfRidsIn(el) {
+    var out = [];
+    var kinds = ['headerReference', 'footerReference'];
+    for (var k = 0; k < kinds.length; k++) {
+      var list = allByNs(el, kinds[k], W_NS);
+      for (var i = 0; i < list.length; i++) {
+        var id = list[i].getAttributeNS(R_NS, 'id');
+        if (id && out.indexOf(id) < 0) out.push(id);
+      }
+    }
+    return out;
+  }
+
+  /** 部件里有没有实际内容（文字 / 域 / 图片） */
+  function partHasContent(pDoc) {
+    var txt = '';
+    var ts = allByNs(pDoc, 't', W_NS);
+    for (var i = 0; i < ts.length; i++) txt += ts[i].textContent;
+    if (txt.trim()) return true;
+    return !!(allByNs(pDoc, 'fldChar', W_NS).length || allByNs(pDoc, 'instrText', W_NS).length ||
+      allByNs(pDoc, 'drawing', W_NS).length || allByNs(pDoc, 'pict', W_NS).length);
+  }
+
+  /** 解析模板，取出它的前置页（封面 + 声明页）及其依赖。返回的东西要能存进
+      localStorage，所以图片转成 base64 —— 模板不用每次重新上传。 */
+  async function extractFrontMatter(data) {
+    if (typeof JSZip === 'undefined') throw new Error('缺少 JSZip 库');
+    var zip = await JSZip.loadAsync(data);
+    var entry = zip.file('word/document.xml');
+    if (!entry) throw new Error('模板不是有效的 .docx 文件（缺少 word/document.xml）');
+    var doc = new DOMParser().parseFromString(await entry.async('string'), 'application/xml');
+    unwrapSdt(doc);
+    var body = allByNs(doc, 'body', W_NS)[0];
+    if (!body) throw new Error('模板的 document.xml 里没有 w:body');
+
+    /* 界桩：「摘要 / Abstract」标题，它之前的都是前置页 */
+    var stop = -1;
+    for (var i = 0; i < body.childNodes.length; i++) {
+      var c = body.childNodes[i];
+      if (c.nodeType !== 1 || c.localName !== 'p') continue;
+      if (/^\s*(摘\s*要|Abstract|ABSTRACT)\s*$/.test(paraText(c))) { stop = i; break; }
+    }
+    if (stop < 0) throw new Error('模板里找不到「摘要」标题，无法确定前置页到哪里为止');
+    var els = [];
+    for (var j = 0; j < stop; j++) {
+      if (body.childNodes[j].nodeType === 1) els.push(body.childNodes[j]);
+    }
+    if (!els.length) throw new Error('模板的前置页是空的（「摘要」标题就在最前面）');
+
+    var srcRels = {};
+    var relsEntry = zip.file('word/_rels/document.xml.rels');
+    if (relsEntry) {
+      srcRels = relInfoOf(new DOMParser().parseFromString(await relsEntry.async('string'), 'application/xml'));
+    }
+
+    var imgRids = [], hfRids = [];
+    for (var k = 0; k < els.length; k++) {
+      var ir = refRidsIn(els[k]);
+      for (var a = 0; a < ir.length; a++) imgRids.push(ir[a]);
+      var hr = hfRidsIn(els[k]);
+      for (var b = 0; b < hr.length; b++) hfRids.push(hr[b]);
+    }
+
+    /* 图片连二进制一起带走 */
+    var media = [];
+    for (var m = 0; m < imgRids.length; m++) {
+      var ri = srcRels[imgRids[m]];
+      if (!ri || ri.mode === 'External') continue;      // 外链图片（http://…）不搬
+      var mPath = partPath(ri.target);
+      var mf = zip.file(mPath);
+      if (!mf) continue;
+      var em = /(\.[a-z0-9]+)$/i.exec(mPath);
+      media.push({ rid: imgRids[m], ext: em ? em[1].toLowerCase() : '.png', b64: await mf.async('base64') });
+    }
+
+    /* 页眉页脚一律不搬 —— 封面与声明页不该有页眉、更不该有页码（附件8 的范本
+       本身也是空的），而且搬过来的部件会不会被 addFooter 挑中当页码页脚，取决于
+       [Content_Types].xml 里的先后顺序，那是碰运气。所以引用全删。
+       但「有内容却没搬」这件事不能静默丢掉，记下来交给界面告诉作者。 */
+    var ignoredParts = [];
+    for (var q = 0; q < hfRids.length; q++) {
+      var info = srcRels[hfRids[q]];
+      if (!info || info.mode === 'External') continue;
+      var pPath = partPath(info.target);
+      var pf = zip.file(pPath);
+      if (!pf) continue;
+      var pXml = await pf.async('string');
+      var pDoc = new DOMParser().parseFromString(pXml, 'application/xml');
+      if (!partHasContent(pDoc)) continue;
+      var kind = info.type === REL_HEADER ? '页眉' : '页脚';
+      if (ignoredParts.indexOf(kind) < 0) ignoredParts.push(kind);
+    }
+
+    /* 模板根上的命名空间声明 —— 目标根上没有的必须补，否则新节点是
+       「未绑定的前缀」，Word 直接判定文档损坏（换正文.mjs 踩过这个坑） */
+    var ns = {};
+    var rootEl = doc.documentElement;
+    for (var n = 0; n < rootEl.attributes.length; n++) {
+      var at = rootEl.attributes[n];
+      if (at.name && at.name.indexOf('xmlns:') === 0) ns[at.name] = at.value;
+    }
+
+    var xml = '';
+    for (var s = 0; s < els.length; s++) xml += new XMLSerializer().serializeToString(els[s]);
+
+    return {
+      xml: xml, media: media, ignoredParts: ignoredParts, ns: ns,
+      els: els.length,
+      boundary: paraText(body.childNodes[stop]).replace(/\s+/g, '')
+    };
+  }
+
+  /** 把 extractFrontMatter 的产物接到目标文档最前面 */
+  async function applyFrontMatter(zip, doc, front) {
+    var body = allByNs(doc, 'body', W_NS)[0];
+    if (!body || !front || !front.xml) return 0;
+
+    /* 1. 命名空间补丁：先补到目标根上，下面解析新节点时才有得用 */
+    var rootEl = doc.documentElement;
+    var have = {};
+    for (var a = 0; a < rootEl.attributes.length; a++) {
+      var at = rootEl.attributes[a];
+      if (at.name && at.name.indexOf('xmlns') === 0) have[at.name] = at.value;
+    }
+    var decls = '';
+    for (var p in have) {
+      if (Object.prototype.hasOwnProperty.call(have, p)) decls += ' ' + p + '="' + have[p] + '"';
+    }
+    if (front.ns) {
+      for (var q in front.ns) {
+        if (!Object.prototype.hasOwnProperty.call(front.ns, q)) continue;
+        if (q === 'xmlns' || have[q]) continue;      // 默认命名空间不动（词法上不能改）
+        rootEl.setAttributeNS(XMLNS_NS, q, front.ns[q]);
+        decls += ' ' + q + '="' + front.ns[q] + '"';
+        have[q] = front.ns[q];
+      }
+    }
+
+    /* 2. 关系表：图片与页眉页脚都要新号 */
+    var relsEntry = zip.file('word/_rels/document.xml.rels');
+    var relsDoc;
+    if (relsEntry) {
+      relsDoc = new DOMParser().parseFromString(await relsEntry.async('string'), 'application/xml');
+    } else {
+      relsDoc = new DOMParser().parseFromString(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="' + PKG_REL_NS + '"></Relationships>',
+        'application/xml');
+    }
+    function addRel(type, target) {
+      var rid = nextRid(relsDoc);   // 每次重新扫，新加的会被算进去
+      var rel = relsDoc.createElementNS(PKG_REL_NS, 'Relationship');
+      rel.setAttribute('Id', rid);
+      rel.setAttribute('Type', type);
+      rel.setAttribute('Target', target);
+      relsDoc.documentElement.appendChild(rel);
+      return rid;
+    }
+
+    var ctEntry = zip.file('[Content_Types].xml');
+    var ctDoc = ctEntry
+      ? new DOMParser().parseFromString(await ctEntry.async('string'), 'application/xml') : null;
+
+    function ensureImgDefault(ext) {
+      if (!ctDoc) return;
+      var e = ext.replace(/^\./, '').toLowerCase();
+      var defs = ctDoc.getElementsByTagName('Default');
+      for (var i = 0; i < defs.length; i++) {
+        if ((defs[i].getAttribute('Extension') || '').toLowerCase() === e) return;
+      }
+      var nd = ctDoc.createElementNS(CT_NS, 'Default');
+      nd.setAttribute('Extension', e);
+      nd.setAttribute('ContentType', IMG_CT[e] || 'application/octet-stream');
+      ctDoc.documentElement.insertBefore(nd, ctDoc.documentElement.firstChild);
+    }
+
+    /* 图片：落到 word/media/frontN.ext —— 用独立前缀，绝不撞已有的 imageN */
+    var ridMap = {};
+    var media = front.media || [];
+    for (var i = 0; i < media.length; i++) {
+      var md = media[i];
+      var name = 'front' + (i + 1) + md.ext;
+      zip.file('word/media/' + name, md.b64, { base64: true });
+      ridMap[md.rid] = addRel(REL_IMAGE, 'media/' + name);
+      ensureImgDefault(md.ext);
+    }
+
+    /* 3. 前置页 XML 解析成节点（用目标根的命名空间声明包一层，前缀才绑得上） */
+    var tmp;
+    try {
+      tmp = new DOMParser().parseFromString(
+        '<?xml version="1.0" encoding="UTF-8"?><w:frontmatter' + decls + '>' + front.xml + '</w:frontmatter>',
+        'application/xml');
+    } catch (e) {
+      throw new Error('模板前置页的 XML 解析失败：' + (e.message || e));
+    }
+    var wrapEl = tmp.documentElement;
+    if (!wrapEl || wrapEl.getElementsByTagName('parsererror').length) {
+      throw new Error('模板前置页的 XML 解析失败（命名空间可能不完整）');
+    }
+
+    /* 4. rId 换号；指不到部件的页眉页脚引用就地删掉 */
+    var toInsert = [];
+    function walk(el) {
+      if (el.nodeType !== 1) return;
+      var attrs = el.attributes;
+      for (var x = 0; x < attrs.length; x++) {
+        var ax = attrs[x];
+        if (ax.namespaceURI !== R_NS) continue;
+        var nv = ridMap[ax.value];
+        if (nv) ax.value = nv;
+      }
+      var kids = [];
+      for (var y = 0; y < el.childNodes.length; y++) kids.push(el.childNodes[y]);
+      for (var z = 0; z < kids.length; z++) {
+        var kid = kids[z];
+        if (kid.nodeType !== 1) continue;
+        if ((kid.localName === 'headerReference' || kid.localName === 'footerReference') &&
+          kid.namespaceURI === W_NS) {
+          var kidId = kid.getAttributeNS(R_NS, 'id');
+          if (!ridMap[kidId]) { el.removeChild(kid); continue; }   // 空部件，别留悬空引用
+        }
+        walk(kid);
+      }
+    }
+    var topKids = [];
+    for (var t = 0; t < wrapEl.childNodes.length; t++) topKids.push(wrapEl.childNodes[t]);
+    for (var u = 0; u < topKids.length; u++) {
+      if (topKids[u].nodeType !== 1) continue;
+      walk(topKids[u]);
+      toInsert.push(topKids[u]);
+    }
+    if (!toInsert.length) throw new Error('模板前置页里没有可插入的内容');
+
+    /* 5. 目标自己的封面区先删掉，免得两份封面并存 */
+    var tstop = -1;
+    for (var v = 0; v < body.childNodes.length; v++) {
+      var cv = body.childNodes[v];
+      if (cv.nodeType !== 1 || cv.localName !== 'p') continue;
+      if (/^\s*(摘\s*要|Abstract|ABSTRACT)\s*$/.test(paraText(cv))) { tstop = v; break; }
+    }
+    if (tstop > 0) {
+      for (var w = tstop - 1; w >= 0; w--) {
+        if (body.childNodes[w].nodeType === 1) body.removeChild(body.childNodes[w]);
+      }
+    }
+
+    /* 6. 插到最前面。锚点取一次就固定住 —— 每轮都拿 body.firstChild 当锚点的话，
+       元素会一个接一个插到前一个的前面，整段前置页顺序颠倒（校徽跑到声明页后面） */
+    var anchor = body.firstChild;
+    for (var m2 = 0; m2 < toInsert.length; m2++) {
+      body.insertBefore(doc.importNode(toInsert[m2], true), anchor);
+    }
+
+    zip.file('word/_rels/document.xml.rels', serialize(relsDoc, 'word/_rels/document.xml.rels'));
+    if (ctDoc) zip.file('[Content_Types].xml', serialize(ctDoc, '[Content_Types].xml'));
+    return toInsert.length;
+  }
+
   /* ---------- 主入口 ---------- */
   async function formatDocx(data, settings, opts) {
     opts = opts || {};
@@ -2767,6 +3092,13 @@
     if (!root || root.localName !== 'document') throw new Error('文档 XML 解析失败');
 
     unwrapSdt(doc); // 解包目录 sdt，让目录条目参与识别与格式化
+
+    /* 套用模板前置页：把模板的封面/声明页接到最前面，替换掉本文档自己的
+       封面区。必须在收集段落之前做 —— 后面每一道工序都基于最终结构 */
+    var frontEls = 0;
+    if (opts.templateFront) {
+      frontEls = await applyFrontMatter(zip, doc, opts.templateFront);
+    }
 
     var paras = collectParas(doc);
     var cls = classifyParas(paras);
@@ -2855,7 +3187,7 @@
     separateTablesAndImages(doc, frontBoundary); // 表格与图片紧邻时自动空一行，避免重叠
 
     var footerRid = null;
-    if (settings.pageNumber !== 'none' && !hasFooterRef(doc)) {
+    if (settings.pageNumber !== 'none' && !hasFooterRef(doc, frontSectPrs)) {
       try { footerRid = await addFooter(zip, doc, settings); } catch (e) { footerRid = null; }
     }
     setSections(doc, settings, footerRid, frontSectPrs);
@@ -2891,14 +3223,16 @@
     counts.fieldsFixed = fieldsFixed;
     counts.footerAdded = !!footerRid;
     counts.bodyHeader = headerSet;
+    counts.frontMatter = frontEls;
+    counts.frontIgnoredHf = (opts.templateFront && opts.templateFront.ignoredParts) || [];
 
     var type = opts.format === 'nodebuffer' ? 'nodebuffer' : 'blob';
     var out = await zip.generateAsync({ type: type, mimeType: MIME_DOCX, compression: 'DEFLATE' });
     return { data: out, counts: counts, info: cls.info, settings: settings };
   }
 
-  var FormatTool = { VERSION: '1.6.7', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
-    classifyParas: classifyParas, outputName: outputName };
+  var FormatTool = { VERSION: '1.7.0', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
+    classifyParas: classifyParas, outputName: outputName, extractFrontMatter: extractFrontMatter };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = FormatTool;
   else global.FormatTool = FormatTool;

@@ -103,6 +103,22 @@
       </div>
       <p class="settings-sub" id="schoolPresetDesc">选择学校后自动套用该校格式要求，仍可手动微调各项</p>
 
+      <details>
+        <summary>前置页（封面 / 声明页）</summary>
+        <div class="group">
+          <div class="row row-check">
+            <label>套用模板文档的封面与声明页</label>
+            <input type="checkbox" id="templateFront" disabled>
+          </div>
+          <div class="school-actions">
+            <button class="btn btn-ghost btn-sm" id="btnPickTemplate">选择模板文档</button>
+            <button class="btn btn-ghost btn-sm btn-danger" id="btnClearTemplate" hidden>清除</button>
+          </div>
+          <p class="settings-sub" id="templateStatus">尚未选择模板文档</p>
+          <p class="settings-sub" style="margin-top:8px">模板只取它「摘要」标题之前的部分（封面 + 原创性声明页），照搬到本文档最前面并替换掉本文档自己的封面区；摘要及以后仍用本文档的内容。模板里的图片会一并搬过来。模板前置页的页眉页脚不搬 —— 封面与声明页不编页码、不印页眉。模板只存在本机浏览器里，下次打开不用重新选择。</p>
+        </div>
+      </details>
+
       <details open>
         <summary>页面设置</summary>
         <div class="group">
@@ -484,6 +500,7 @@
 </div>
 
 <input type="file" id="fileSchool" accept=".docx" hidden>
+<input type="file" id="fileTemplate" accept=".docx" hidden>
 <div class="modal" id="addSchoolModal" hidden>
   <div class="modal-card">
     <h3>添加学校要求</h3>
@@ -499,8 +516,8 @@
 
 <script src="libs/jszip.min.js"></script>
 <script src="libs/mammoth.browser.min.js"></script>
-<script src="js/presets.js?v=27"></script>
-<script src="js/formatter.js?v=27"></script>
-<script src="js/app.js?v=27"></script>
+<script src="js/presets.js?v=28"></script>
+<script src="js/formatter.js?v=28"></script>
+<script src="js/app.js?v=28"></script>
 </body>
 </html>
