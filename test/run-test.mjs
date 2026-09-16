@@ -702,7 +702,8 @@ const PRESETS = globalThis.SCHOOL_PRESETS || [];
 const presetFields = ['marginTop','marginBottom','marginLeft','marginRight','pageNumber','bodyFont','latinFont',
   'bodySize','firstLineChars','titleSize','titleBold','h1Size','h1Jc','h2Size','h3Size','headingBold',
   'absHeadSize','absBodySize','refSize','refHangingChars','captionFont','captionSize','pageNumberSplit',
-  'threeLineTable','chapterPageBreak','autoToc','lineSpacingMode','lineSpacing'];
+  'threeLineTable','tableText','tableFont','tableSize',
+  'chapterPageBreak','autoToc','lineSpacingMode','lineSpacing'];
 let presetOk = true;
 for (const p of PRESETS) {
   const missing = presetFields.filter(f => p.settings[f] === undefined);
@@ -968,6 +969,107 @@ console.log(`✓ 三级标题缺空格: 补空格=${h3SpaceOk} | 不补成两个
 console.log(`  标题判定: ${txt.filter(t => /^\d+\.\d+\.\d+/.test(t)).map(t => t + (isH3(t) ? '[标题]' : '[正文✗]')).join(' | ')}`);
 if (!h3SpaceOk || !h3DoubleOk || !h3RoleOk || !h3BodyOk) {
   throw new Error('三级标题（编号后无空格）未被正确识别 / 补空格有误');
+}
+
+// 24. 表格内文字统一五号宋体 + Times New Roman；表格与正文说明框的底纹一律清掉。
+//     2026-09-16 作者反馈「最新输出版本中表格内的文字部分格式未修改，且表格整体
+//     底纹需要设定为无」——根因是 collectParas 只收 body 的直接子段落，表格段落
+//     嵌在 tbl 底下，正文那套 applyFormatting 一个字也改不到表内。
+//     附件8：「表序、表名和表格内字体均为五号宋体」，没给表头开例外。
+//     封面/声明页的表格属于前置部分，一个字都不许动（含它自己的底纹）。
+function buildTableTestDocx() {
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const P = (t) => `<w:p><w:r><w:t>${esc(t)}</w:t></w:r></w:p>`;
+  // 带指定字体/字号/加粗的单元格段落
+  const Pc = (t, { font = '黑体', latin = 'Consolas', sz = 20, bold = false } = {}) =>
+    `<w:p><w:r><w:rPr><w:rFonts w:ascii="${latin}" w:hAnsi="${latin}" w:eastAsia="${font}" w:cs="${latin}"/>` +
+    (bold ? '<w:b/>' : '') +
+    `<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/></w:rPr><w:t>${esc(t)}</w:t></w:r></w:p>`;
+  const tc = (inner, shd) =>
+    `<w:tc><w:tcPr>${shd ? `<w:shd w:val="clear" w:color="auto" w:fill="${shd}"/>` : ''}</w:tcPr>${inner}</w:tc>`;
+  const tr = (cells) => `<w:tr>${cells}</w:tr>`;
+
+  // 封面表格：黑体加粗三号 + 底纹，全部必须原样保留
+  const coverTbl = '<w:tbl>' + tr(
+    tc(Pc('课题名称', { font: '黑体', latin: '黑体', sz: 32, bold: true }), 'D9E2F3') +
+    tc(Pc('二手车交易数据分析系统', { font: '黑体', latin: '黑体', sz: 32, bold: true }), 'D9E2F3')
+  ) + '</w:tbl>';
+
+  // 正文表格：表头黑体加粗 10pt、数据行 Consolas 10pt、单元格带浅蓝底纹
+  const bodyTbl = '<w:tbl>' + tr(
+    tc(Pc('字段名', { font: '黑体', sz: 20, bold: true }), 'DCE6F1') +
+    tc(Pc('类型', { font: '黑体', sz: 20, bold: true }), 'DCE6F1')
+  ) + tr(
+    tc(Pc('price', { latin: 'Consolas', sz: 20 })) +
+    tc(Pc('decimal(10,2)', { latin: 'Consolas', sz: 20 }))
+  ) + '</w:tbl>';
+
+  // 正文里的说明框：段落级底纹（F2F4F7），要清掉
+  const callout = `<w:p><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F2F4F7"/></w:pPr>` +
+    `<w:r><w:t>本系统数据为仿真数据。</w:t></w:r></w:p>`;
+
+  const body = P('重庆工程学院本科毕业设计（论文）') + coverTbl +
+    P('摘  要') + P('本文研究二手车交易数据分析。') + P('关键词：二手车；数据分析') +
+    P('第1章 绪论') + P('1.1 研究背景') + P('二手车市场持续增长。') + bodyTbl + callout +
+    P('参考文献') + P('[1] 孙家广.计算机图形学[M].北京:清华大学出版社,1995:15-18.');
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="' + W + '"><w:body>' + body +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'nodebuffer' });
+}
+
+const tblOut = (await FormatTool.formatDocx(await buildTableTestDocx(), FormatTool.DEFAULTS, { format: 'nodebuffer' })).data;
+const tz = await JSZip.loadAsync(tblOut);
+const tdoc = new DOMParser().parseFromString(await tz.file('word/document.xml').async('string'), 'application/xml');
+const tBody = tdoc.getElementsByTagNameNS(W_NS, 'body')[0];
+const tKids = Array.from(tBody.childNodes).filter((n) => n.nodeType === 1);
+const tAbsIdx = tKids.findIndex((k) => /^摘\s*要/.test((k.textContent || '').trim()));
+const coverTblEl = tKids.find((k, i) => k.localName === 'tbl' && i < tAbsIdx);
+const bodyTblEl = tKids.find((k, i) => k.localName === 'tbl' && i > tAbsIdx);
+
+/* 取表格里每个带文字的 run 的字体/字号/粗细 */
+function runsOf(tblEl) {
+  const out = [];
+  Array.from(tblEl.getElementsByTagNameNS(W_NS, 'r')).forEach((r) => {
+    if (!r.getElementsByTagNameNS(W_NS, 't').length) return;
+    const rPr = Array.from(r.childNodes).find((n) => n.nodeType === 1 && n.localName === 'rPr');
+    const get = (name, attr) => {
+      if (!rPr) return null;
+      const el = Array.from(rPr.childNodes).find((n) => n.nodeType === 1 && n.localName === name);
+      return el ? el.getAttributeNS(W_NS, attr) : null;
+    };
+    out.push({
+      text: Array.from(r.getElementsByTagNameNS(W_NS, 't')).map((x) => x.textContent).join(''),
+      east: get('rFonts', 'eastAsia'), ascii: get('rFonts', 'ascii'),
+      sz: get('sz', 'val'),
+      bold: !!(rPr && Array.from(rPr.childNodes).some((n) => n.nodeType === 1 && n.localName === 'b')),
+    });
+  });
+  return out;
+}
+const shdCount = (el) => el.getElementsByTagNameNS(W_NS, 'shd').length;
+
+const bodyRuns = runsOf(bodyTblEl);
+const bodyTblOk = bodyRuns.length > 0 && bodyRuns.every((r) =>
+  r.east === '宋体' && r.ascii === 'Times New Roman' && r.sz === '21' && !r.bold);
+const tblShdOk = shdCount(bodyTblEl) === 0;
+const coverRuns = runsOf(coverTblEl);
+const coverOk = coverRuns.length > 0 && coverRuns.every((r) => r.east === '黑体' && r.sz === '32' && r.bold) &&
+  shdCount(coverTblEl) > 0;                       // 封面表格的底纹必须留着
+const calloutEl = tKids.find((k) => k.localName === 'p' && /本系统数据为仿真数据/.test(k.textContent || ''));
+const calloutOk = !!calloutEl && shdCount(calloutEl) === 0;
+const tblTextOk = bodyTblOk && tblShdOk && coverOk && calloutOk;
+
+console.log(`✓ 表格文字格式: 正文表内 run ${bodyRuns.length} 个全为五号宋体+TNR+不加粗=${bodyTblOk} | ` +
+  `表内底纹清空=${tblShdOk} | 正文说明框底纹清空=${calloutOk} | 封面表格原样保留=${coverOk}`);
+console.log(`  正文表内 run: ${bodyRuns.map((r) => `${r.text}[${r.east}/${
+  r.ascii.split(' ')[0]}/${r.sz}${r.bold ? '/粗' : ''}]`).join(' ')}`);
+if (!tblTextOk) {
+  throw new Error('表格内文字未按附件8 统一为五号宋体 + Times New Roman，或底纹未清/封面被误改');
 }
 
 console.log('\n全部校验通过 ✔');

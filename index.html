@@ -193,6 +193,10 @@
             <input type="checkbox" id="threeLineTable" checked>
           </div>
           <div class="row row-check">
+            <label>表格内文字统一五号宋体（表头不加粗）</label>
+            <input type="checkbox" id="tableText" checked>
+          </div>
+          <div class="row row-check">
             <label>一级标题之间换页</label>
             <input type="checkbox" id="chapterPageBreak" checked>
           </div>
@@ -212,7 +216,7 @@
             <label>引用标注 [1] 改为上标</label>
             <input type="checkbox" id="citeSuperscript" checked>
           </div>
-          <p class="settings-sub" style="margin-top:8px">表格：清除内部所有线（含每行自带的行级边框），仅保留顶线/底线两根 1.5 磅线；换页：每章另起一页；页码：摘要/目录用 Ⅰ Ⅱ Ⅲ，正文从绪论起用 1 2 3；页眉：正文起各页页眉自动显示所在章节标题，封面/摘要/目录的页眉保持原样；上标：正文中的 [1][2] 等引用标注改为右上角上标，参考文献表本身的序号不变。</p>
+          <p class="settings-sub" style="margin-top:8px">表格：清除内部所有线（含每行自带的行级边框），仅保留顶线/底线两根 1.5 磅线，表内文字统一五号宋体 + Times New Roman（附件8：「表格内字体均为五号宋体」，表头不开例外，故表头也五号、不加粗），封面/声明页的表格不动；换页：每章另起一页；页码：摘要/目录用 Ⅰ Ⅱ Ⅲ，正文从绪论起用 1 2 3；页眉：正文起各页页眉自动显示所在章节标题，封面/摘要/目录的页眉保持原样；上标：正文中的 [1][2] 等引用标注改为右上角上标，参考文献表本身的序号不变。</p>
         </div>
       </details>
 
@@ -220,7 +224,7 @@
         <summary>内容清理与题注</summary>
         <div class="group">
           <div class="row row-check">
-            <label>清除「突出显示」底色</label>
+            <label>清除底色（突出显示 + 表格/段落底纹）</label>
             <input type="checkbox" id="clearHighlight" checked>
           </div>
           <div class="row row-check">
@@ -235,7 +239,7 @@
             <label>每章末尾补分节符（下一页）</label>
             <input type="checkbox" id="chapterSection" checked>
           </div>
-          <p class="settings-sub" style="margin-top:8px">清除底色：删掉全文的「突出显示」标记（写作时标英文术语的灰底），字符底纹不动；删空格：正文和表格里中文与英文/数字之间的空格一律删除，但标题、目录、题注里「编号 + 文字」的那个空格按附件8 保留（1 绪论、图4.1 系统图）；真题注：图片题注改为「题注」样式 + SEQ 域自动编号（图4.1、表3.1），表题置于表格上方、图题置于图片下方，正文里「如图4-1所示」这类引用同步改号；分节符：每章末尾补一条「分节符（下一页）」，已有则跳过，便于逐章单独设页眉。</p>
+          <p class="settings-sub" style="margin-top:8px">清除底色：删掉全文的「突出显示」标记（写作时标英文术语的灰底）与所有底纹（源文档的浅蓝表头 DCE6F1、正文说明框的浅灰蓝 F2F4F7 等），三线表通篇不带底色；封面/学生声明页属于前置部分，一律不动；删空格：正文和表格里中文与英文/数字之间的空格一律删除，但标题、目录、题注里「编号 + 文字」的那个空格按附件8 保留（1 绪论、图4.1 系统图）；真题注：图片题注改为「题注」样式 + SEQ 域自动编号（图4.1、表3.1），表题置于表格上方、图题置于图片下方，正文里「如图4-1所示」这类引用同步改号；分节符：每章末尾补一条「分节符（下一页）」，已有则跳过，便于逐章单独设页眉。</p>
         </div>
       </details>
 
@@ -338,6 +342,29 @@
               <option value="1.5">1.5 字符</option>
             </select>
           </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>表格</summary>
+        <div class="group">
+          <div class="row">
+            <label>中文字体</label>
+            <select id="tableFont">
+              <option value="宋体" selected>宋体（学校要求）</option>
+              <option value="黑体">黑体</option>
+              <option value="楷体">楷体</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>字号</label>
+            <select id="tableSize">
+              <option value="10.5" selected>五号 (10.5pt)（学校要求）</option>
+              <option value="12">小四 (12pt)</option>
+              <option value="9">小五 (9pt)</option>
+            </select>
+          </div>
+          <p class="settings-sub" style="margin-top:8px">西文与数字跟随「正文 → 西文字体」（默认 Times New Roman）。附件8：表序、表名和表格内字体均为五号宋体，表头不开例外。</p>
         </div>
       </details>
 
@@ -445,7 +472,7 @@
 </main>
 
 <footer class="footer">
-  <p>论文格式助手 v1.6.6 — 工科/文科模式分离（格式互不影响）/ 多学校格式预设切换（支持上传要求文档添加学校）/ 目录识别重排并自动更新页码 / 页眉自动显示章名 / 标题编号体例「1 绪论」「3.1.1 系统目标」（编号后缺空格自动补，附录与图A1 另行编号）/ 图片段落单倍行距 / 表格仅保留顶底线 1.5 磅（含清除行级边框）/ 图表 Word 真题注（SEQ 自动编号）/ 每章补分节符 / 清除突出显示 / 删除中西文空格<br><span class="settings-sub">若页面表现与说明不符，请按 Ctrl+F5 强制刷新（浏览器可能缓存了旧版脚本），并确认页面左上角版本号是最新的。</span></p>
+  <p>论文格式助手 v1.6.7 — 工科/文科模式分离（格式互不影响）/ 多学校格式预设切换（支持上传要求文档添加学校）/ 目录识别重排并自动更新页码 / 页眉自动显示章名 / 标题编号体例「1 绪论」「3.1.1 系统目标」（编号后缺空格自动补，附录与图A1 另行编号）/ 图片段落单倍行距 / 表格仅保留顶底线 1.5 磅（含清除行级边框）且表内文字统一五号宋体 + Times New Roman / 图表 Word 真题注（SEQ 自动编号）/ 每章补分节符 / 清除底色（突出显示 + 底纹）/ 删除中西文空格<br><span class="settings-sub">若页面表现与说明不符，请按 Ctrl+F5 强制刷新（浏览器可能缓存了旧版脚本），并确认页面左上角版本号是最新的。</span></p>
 </footer>
 
 <div class="toast" id="toast" hidden></div>
@@ -472,8 +499,8 @@
 
 <script src="libs/jszip.min.js"></script>
 <script src="libs/mammoth.browser.min.js"></script>
-<script src="js/presets.js?v=26"></script>
-<script src="js/formatter.js?v=26"></script>
-<script src="js/app.js?v=26"></script>
+<script src="js/presets.js?v=27"></script>
+<script src="js/formatter.js?v=27"></script>
+<script src="js/app.js?v=27"></script>
 </body>
 </html>

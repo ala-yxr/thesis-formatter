@@ -34,7 +34,8 @@
         refSize: 10.5, refHangingChars: 0,
         captionFont: '宋体', captionSize: 10.5,
         pageNumber: 'center', pageNumberSplit: true,
-        threeLineTable: true, chapterPageBreak: true, autoToc: true,
+        threeLineTable: true, tableText: true, tableFont: '宋体', tableSize: 10.5,
+        chapterPageBreak: true, autoToc: true,
         bodyHeader: true, updateFields: true, citeSuperscript: true,
         clearHighlight: true, cjkSpace: true, wordCaption: true, chapterSection: true,
         chapterNumber: true
@@ -56,7 +57,8 @@
         refSize: 10.5, refHangingChars: 0,
         captionFont: '宋体', captionSize: 10.5,
         pageNumber: 'center', pageNumberSplit: false,
-        threeLineTable: true, chapterPageBreak: true, autoToc: true,
+        threeLineTable: true, tableText: true, tableFont: '宋体', tableSize: 10.5,
+        chapterPageBreak: true, autoToc: true,
         bodyHeader: false, updateFields: true, citeSuperscript: true,
         clearHighlight: true, cjkSpace: true, wordCaption: true, chapterSection: true,
         chapterNumber: false   // 文科：一级标题用汉字序号（「一 员工绩效考核…」），章号体例不改

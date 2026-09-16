@@ -65,13 +65,16 @@
     pageNumber: 'center',          // 页码：center | right | none
     pageNumberSplit: true,         // 前置部分罗马数字、主体阿拉伯数字单独编页
     threeLineTable: true,          // 表格仅保留顶线/底线 1.5 磅，清除其余所有线条
+    tableText: true,               // 表格内文字统一格式（附件8：表格内字体均为五号宋体，表头不开例外）
+    tableFont: '宋体',             // 表格内中文字体（西文跟随 latinFont = Times New Roman）
+    tableSize: 10.5,               // 表格内字号（五号 = 10.5pt）
     chapterPageBreak: true,        // 一级标题之间换页
     chapterNumber: true,           // 标题编号体例（「第1章 绪论」→「1 绪论」；「3.1.1系统目标」→「3.1.1 系统目标」）
     autoToc: true,                 // 目录替换为 Word 自动目录域（可整体选择、可更新）
     bodyHeader: true,              // 正文及各后置分节页眉 = 一级标题（章名，STYLEREF 域）
     updateFields: true,            // 打开文档时自动更新域（目录页码自动刷新）
     citeSuperscript: true,         // 正文引用标注 [n] 改为上标（附件8：右上角上标标注）
-    clearHighlight: true,          // 清除全文「突出显示」底色（论文不应带灰底标记）
+    clearHighlight: true,          // 清除全文底色：突出显示 + 字符/段落/表格单元格底纹（论文不应带灰底彩底）
     cjkSpace: true,                // 删除正文中中文与英文/数字之间的空格（编号后的间隔保留）
     chapterSection: true,          // 每章末尾补「分节符（下一页）」，便于逐章单独设置页眉
     wordCaption: true              // 图片题注改用 Word 真题注（题注样式 + SEQ 域自动编号）
@@ -595,17 +598,46 @@
     }
   }
 
-  /* ---------- 清除「突出显示」底色 ----------
+  /* ---------- 清除底色 ----------
      论文不应带任何灰底/彩底标记（写作时标英文术语很常见），交付前一律清掉。
-     只删 w:highlight（工具条上的「突出显示」），字符底纹 w:shd 不动——它常被
-     模板用来做表头底色等正常排版。 */
-  function clearHighlights(doc) {
-    var list = allByNs(doc, 'highlight', W_NS);   // 可能是 live NodeList，先快照
-    var hls = [];
-    for (var i = 0; i < list.length; i++) hls.push(list[i]);
+     两样都清：
+     ① w:highlight —— 工具条上的「突出显示」；
+     ② w:shd —— 字符/段落/表格单元格的底纹。
+     ②原先是不动的（注释写着「常被模板用来做表头底色等正常排版」），但附件8 的
+     表格是纯三线表：顶线 1.5 磅、栏目线 0.75 磅、底线 1.5 磅，通篇没有底色，
+     源文档里那种浅蓝表头（DCE6F1）和正文说明框的浅灰蓝（F2F4F7）都要去掉。
+     2026-09-16 按作者要求改为底纹一并清除。 */
+  function removeAll(doc, name) {
+    var list = allByNs(doc, name, W_NS);   // 可能是 live NodeList，先快照
+    var els = [];
+    for (var i = 0; i < list.length; i++) els.push(list[i]);
     var n = 0;
-    for (var j = hls.length - 1; j >= 0; j--) {
-      if (hls[j].parentNode) { hls[j].parentNode.removeChild(hls[j]); n++; }
+    for (var j = els.length - 1; j >= 0; j--) {
+      if (els[j].parentNode) { els[j].parentNode.removeChild(els[j]); n++; }
+    }
+    return n;
+  }
+
+  function clearHighlights(doc) {
+    return removeAll(doc, 'highlight');
+  }
+
+  /* 底纹分布得很散：可能在 rPr（字符）、pPr（段落）、tcPr（单元格）、
+     trPr/tblPrEx（行）、tblPr（整表）里，所以按元素扫一遍。
+     前置部分（封面/学生声明）里的底纹一律不动 —— 与三线表、换页等工序同一口径，
+     封面表格是学校模板的一部分，改了就不像模板了。 */
+  function clearShading(doc, frontBoundary) {
+    var body = allByNs(doc, 'body', W_NS)[0];
+    if (!frontBoundary || !body) return removeAll(doc, 'shd');
+    var n = 0, inBody = false;
+    for (var i = 0; i < body.childNodes.length; i++) {
+      var c = body.childNodes[i];
+      if (c.nodeType !== 1) continue;
+      if (!inBody) {
+        /* 边界之前 → 前置部分（封面/声明），跳到边界为止，一个都不动 */
+        if (c === frontBoundary) inBody = true; else continue;
+      }
+      n += removeAll(c, 'shd');
     }
     return n;
   }
@@ -1001,6 +1033,52 @@
     setBorder(tcb, doc, 'insideH', 4, 'none');
     setBorder(tcb, doc, 'insideV', 4, 'none');
     insertInOrder(tcPr, tcb, TCPR_ORDER);
+  }
+
+  /* ---------- 表格内文字格式 ----------
+     附件8：「表序、表名和表格内字体均为五号宋体」——只说了「表格内」，没给表头
+     开例外，所以表头与数据行一律五号宋体、不加粗；西文与数字用 Times New Roman
+     （与正文口径一致）。样章里「五号宋体」也重复标注了三次，没有别的要求。
+     表格内的段落**不在 collectParas 的收集范围**里（那里只收 body 的直接子段落，
+     表格嵌套在 tbl 下面），所以正文那套 applyFormatting 一个字也改不到表内 ——
+     必须单独走这一道。2026-09-16 作者反馈「表格内的文字部分格式未修改」就是这个
+     原因：表里混着宋体/黑体/Consolas，字号 20（10pt）和 32（16pt）并存。
+
+     这里只管字体字号；单元格底纹归 clearShading() 管（全文一次清干净），
+     免得「清除底色」关掉之后表底纹只清一半，变成两套口径。 */
+  function runsInPara(p) {
+    /* 只要本段的 run：段里若嵌了嵌套表格，那张表里的 run 不归本段管 */
+    var out = [];
+    var all = allByNs(p, 'r', W_NS);
+    for (var i = 0; i < all.length; i++) {
+      var crossed = false;
+      for (var a = all[i].parentNode; a && a !== p; a = a.parentNode) {
+        if (a.nodeType === 1 && a.localName === 'tbl') { crossed = true; break; }
+      }
+      if (!crossed) out.push(all[i]);
+    }
+    return out;
+  }
+
+  function formatTableText(doc, tbl, st) {
+    var n = 0;
+    var tcs = wAll(tbl, 'tc');
+    for (var i = 0; i < tcs.length; i++) {
+      var tc = tcs[i];
+      for (var c = 0; c < tc.childNodes.length; c++) {
+        var p = tc.childNodes[c];
+        if (p.nodeType !== 1 || p.localName !== 'p') continue;
+        var runs = runsInPara(p);
+        for (var k = 0; k < runs.length; k++) {
+          if (!wAll(runs[k], 't').length) continue;   // 只带域/图片的 run 不动
+          var rPr = childByNs(runs[k], 'rPr', W_NS);
+          if (!rPr) { rPr = createW(doc, 'rPr'); runs[k].insertBefore(rPr, runs[k].firstChild); }
+          applyRPr(rPr, doc, st, false);              // 表头也走 false：不加粗
+          n++;
+        }
+      }
+    }
+    return n;
   }
 
   function applyTableTopBottom(tbl, doc) {
@@ -2710,8 +2788,11 @@
 
     applyFormatting(doc, paras, cls.roles, settings);
 
-    /* 清除「突出显示」底色：论文不应带灰底/彩底标记 */
-    if (settings.clearHighlight) cls.counts.clearedHighlight = clearHighlights(doc);
+    /* 清除底色：突出显示 + 底纹（论文不应带灰底/彩底标记）。前置部分不动 */
+    if (settings.clearHighlight) {
+      cls.counts.clearedHighlight = clearHighlights(doc);
+      cls.counts.clearedShading = clearShading(doc, frontBoundary);
+    }
 
     /* 页眉/页脚页码域前的孤儿标点（页脚上的「、33」）。
        这是缺陷不是体例偏好，无条件清理，不给开关。 */
@@ -2759,6 +2840,18 @@
         applyTableTopBottom(tbls[t], doc);
       }
     }
+    /* 表格内文字：五号宋体 + Times New Roman（附件8）。必须单独走一道 ——
+       表格段落不在 collectParas 的范围里，applyFormatting 够不着。封面表格不动 */
+    if (settings.tableText) {
+      var ttSt = { eastFont: settings.tableFont, latinFont: settings.latinFont, size: settings.tableSize };
+      var tbls2 = wAll(doc, 'tbl');
+      var ttDone = 0;
+      for (var u = 0; u < tbls2.length; u++) {
+        if (isFrontElement(tbls2[u], frontBoundary)) continue;
+        ttDone += formatTableText(doc, tbls2[u], ttSt);
+      }
+      cls.counts.tableText = ttDone;
+    }
     separateTablesAndImages(doc, frontBoundary); // 表格与图片紧邻时自动空一行，避免重叠
 
     var footerRid = null;
@@ -2804,7 +2897,7 @@
     return { data: out, counts: counts, info: cls.info, settings: settings };
   }
 
-  var FormatTool = { VERSION: '1.6.6', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
+  var FormatTool = { VERSION: '1.6.7', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
     classifyParas: classifyParas, outputName: outputName };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = FormatTool;
