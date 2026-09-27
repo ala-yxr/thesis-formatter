@@ -2190,6 +2190,18 @@
     p.appendChild(be);
   }
 
+  /* 段落（直接子节点）上已有的 _TocN 书签名，没有则返回 null。
+     只认直接子节点：目录书签是段落级的，不会嵌在更深处。 */
+  function ownTocBookmark(p) {
+    for (var i = 0; i < p.childNodes.length; i++) {
+      var c = p.childNodes[i];
+      if (c.nodeType !== 1 || c.localName !== 'bookmarkStart') continue;
+      var nm = c.getAttributeNS(W_NS, 'name') || '';
+      if (/^_Toc\d+$/.test(nm)) return nm;
+    }
+    return null;
+  }
+
   /* 构建自动目录域 sdt：TOC 指令 + 预填充条目（标题文本 + 页码域），
      打开文档自动更新、可整体选择，格式用修正后的 toc 1/2/3 样式 */
   function buildTocFieldSdt(doc, headings, tocIds) {
@@ -2252,11 +2264,18 @@
        只收集第一个一级标题（tocEndEl）之后的真实标题，跳过目录区内的旧目录条目
        （Word 更新过的目录条目可能被误识别为 h1/h2/h3，避免目录叠加） */
     var headings = [];
+    var bmUsed = {};   // 本次已经分配给标题的书签名（防同一名字落到两个标题上）
     var maxId = 0;
     var bsAll = allByNs(doc, 'bookmarkStart', W_NS);
     for (var b = 0; b < bsAll.length; b++) {
       var bid = parseInt(bsAll[b].getAttributeNS(W_NS, 'id') || '0', 10);
       if (!isNaN(bid) && bid > maxId) maxId = bid;
+    }
+    /* 文档里已被占用的书签名（含作者原有的 _TocN）：新建编号要避开它们 */
+    var bmTaken = {};
+    for (var bt = 0; bt < bsAll.length; bt++) {
+      var btn = bsAll[bt].getAttributeNS(W_NS, 'name') || '';
+      if (btn) bmTaken[btn] = true;
     }
     var collecting = false;
     for (var i2 = 0; i2 < paras.length; i2++) {
@@ -2268,8 +2287,21 @@
       var role = roles[i2] === 'refHead' ? 'h1' : roles[i2];
       var lvl = role === 'h1' ? 0 : role === 'h2' ? 1 : role === 'h3' ? 2 : -1;
       if (lvl < 0) continue;
-      var bm = '_Toc' + (headings.length + 1);
-      addBookmarkTo(doc, pEl, ++maxId, bm);
+      /* 标题段上通常已经挂着 Word 给的 _TocN —— 只要生成过目录的文档就有。
+         原先是无条件再加一个同名书签，于是每跑一遍就多一份副本：2026-09-27 实测
+         源文件 CYX_21.1.docx 的 469 个书签全是唯一名，跑一遍就出现 _Toc1×2 …
+         共 41 种重名，跑三遍 _Toc 书签 423 → 501 → 543。重名的 bookmarkStart 在
+         OOXML 里无效，而目录域带 \h（超链接），Word 只认第一个同名书签 ——
+         点目录条目会跳到错误位置。所以：段落上已有就**复用**，不再新建。 */
+      var bm = ownTocBookmark(pEl);
+      if (!bm || bmUsed[bm]) {                    // 没有，或这个名字已被别的标题占用
+        var nb = headings.length + 1;
+        while (bmTaken['_Toc' + nb]) nb++;         // 跳过作者原有的 _TocN
+        bm = '_Toc' + nb;
+        addBookmarkTo(doc, pEl, ++maxId, bm);
+        bmTaken[bm] = true;
+      }
+      bmUsed[bm] = true;
       headings.push({ level: lvl, text: paraText(pEl).trim(), bookmark: bm });
     }
     if (headings.length === 0) return false;
@@ -2645,17 +2677,19 @@
       '</w:p></w:hdr>';
   }
 
-  async function addHeaderPart(zip, styleName, cachedText) {
+  /* 正文页眉部件：**能复用就原地覆盖**，不要每次新建。
+     原先是无条件找第一个空号新建 word/headerN.xml，再把各分节的 headerReference
+     指过去 —— 上一遍建的那个就再也没人引用了，却仍留在包里。2026-09-27 实测
+     （夹具 CYX_21.1.docx 连跑三遍）：header 部件 16 → 17 → 18，每遍多一个；
+     文件大小几乎不变，所以既有的「反复格式化稳定」断言（只比字数/段数）照样绿。
+     判据是「部件里已经有同一个样式名的 STYLEREF 域」—— 满足它的部件本来就是
+     「正文页眉 = 章名」，和我们要写的功能等价，原地覆盖正好把缓存的章名刷新掉。
+     唯一要当心的是**前置部分**：封面/声明/摘要/目录若引用了同一个部件，覆盖它会
+     改掉那几节的页眉，所以 keepRids 里的关联一律跳过。不删任何部件 —— 删部件要
+     同时改 Content_Types、rels 和三处引用判断，爆炸半径远大于收益，而「复用」
+     本身已经让部件数不再增长。 */
+  async function addHeaderPart(zip, styleName, cachedText, keepRids) {
     var ctDoc = new DOMParser().parseFromString(await zip.file('[Content_Types].xml').async('string'), 'application/xml');
-    var n = 1;
-    while (zip.file('word/header' + n + '.xml')) n++;
-    var target = 'word/header' + n + '.xml';
-    var ov = ctDoc.createElementNS(CT_NS, 'Override');
-    ov.setAttribute('PartName', '/' + target);
-    ov.setAttribute('ContentType', CT_HEADER);
-    ctDoc.documentElement.appendChild(ov);
-    zip.file('[Content_Types].xml', serialize(ctDoc, '[Content_Types].xml'));
-    zip.file(target, headerXml(styleName, cachedText));
 
     var relsEntry = zip.file('word/_rels/document.xml.rels');
     var relsDoc;
@@ -2666,14 +2700,55 @@
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="' + PKG_REL_NS + '"></Relationships>',
         'application/xml');
     }
-    var rid = nextRid(relsDoc);
-    var rel = relsDoc.createElementNS(PKG_REL_NS, 'Relationship');
-    rel.setAttribute('Id', rid);
-    rel.setAttribute('Type', REL_HEADER);
-    /* rsid 目标相对 word/ 解析，必须用文件名而非 word/xxx.xml（否则指向 word/word/xxx.xml） */
-    rel.setAttribute('Target', target.replace(/^word\//, ''));
-    relsDoc.documentElement.appendChild(rel);
-    zip.file('word/_rels/document.xml.rels', serialize(relsDoc, 'word/_rels/document.xml.rels'));
+    /* rid → 部件路径。相对 word/ 解析，所以只取文件名再拼回来 */
+    var ridOf = {}, rels = relsDoc.getElementsByTagName('Relationship');
+    for (var rp = 0; rp < rels.length; rp++) {
+      var rtp = rels[rp].getAttribute('Target') || '';
+      ridOf['word/' + rtp.replace(/^\.?\//, '').replace(/^word\//, '')] = rels[rp].getAttribute('Id');
+    }
+    var keep = {};
+    for (var kp = 0; keepRids && kp < keepRids.length; kp++) if (keepRids[kp]) keep[keepRids[kp]] = true;
+
+    var target = null;
+    var files = Object.keys(zip.files);
+    for (var hf = 0; hf < files.length; hf++) {
+      if (!/^word\/header\d*\.xml$/.test(files[hf])) continue;
+      if (keep[ridOf[files[hf]]]) continue;             // 前置部分在用，不许碰
+      var cur = await zip.file(files[hf]).async('string');
+      /* 同一个样式名的 STYLEREF：就是我们（或作者按同一规矩）写的正文页眉 */
+      if (cur.indexOf('STYLEREF "' + styleName + '"') < 0) continue;
+      target = files[hf];
+      break;
+    }
+
+    var xml = headerXml(styleName, cachedText);
+    if (target) {
+      zip.file(target, xml);                            // 原地覆盖，部件数不变
+    } else {
+      var n = 1;
+      while (zip.file('word/header' + n + '.xml')) n++;
+      target = 'word/header' + n + '.xml';
+      var ov = ctDoc.createElementNS(CT_NS, 'Override');
+      ov.setAttribute('PartName', '/' + target);
+      ov.setAttribute('ContentType', CT_HEADER);
+      ctDoc.documentElement.appendChild(ov);
+      zip.file('[Content_Types].xml', serialize(ctDoc, '[Content_Types].xml'));
+      zip.file(target, xml);
+    }
+
+    /* 关联：同 Target 已有关系就复用它的 rId，否则新建 —— 否则每遍都要多一条
+       指向同一个部件的 Relationship，rels 也跟着涨 */
+    var rid = ridOf[target];
+    if (!rid) {
+      rid = nextRid(relsDoc);
+      var rel = relsDoc.createElementNS(PKG_REL_NS, 'Relationship');
+      rel.setAttribute('Id', rid);
+      rel.setAttribute('Type', REL_HEADER);
+      /* 目标相对 word/ 解析，必须用文件名而非 word/xxx.xml（否则指向 word/word/xxx.xml） */
+      rel.setAttribute('Target', target.replace(/^word\//, ''));
+      relsDoc.documentElement.appendChild(rel);
+      zip.file('word/_rels/document.xml.rels', serialize(relsDoc, 'word/_rels/document.xml.rels'));
+    }
     return rid;
   }
 
@@ -2712,8 +2787,19 @@
     sectPrs = sectPrs.filter(function (s) { return frontSectPrs.indexOf(s) < 0; });
     if (!sectPrs.length) return false;
 
+    /* 前置部分（封面/声明/摘要/目录）引用的页眉部件不许被复用覆盖，否则那几节的
+       页眉会被改成章名 —— 附件8 要求前置部分页眉保持原样 */
+    var keepRids = [];
+    for (var fp = 0; fp < frontSectPrs.length; fp++) {
+      var frefs = wAll(frontSectPrs[fp], 'headerReference');
+      for (var fq = 0; fq < frefs.length; fq++) {
+        var frid = frefs[fq].getAttributeNS(R_NS, 'id');
+        if (frid) keepRids.push(frid);
+      }
+    }
+
     var rid;
-    try { rid = await addHeaderPart(zip, styleName, firstH1Text); } catch (e) { return false; }
+    try { rid = await addHeaderPart(zip, styleName, firstH1Text, keepRids); } catch (e) { return false; }
 
     for (var k = 0; k < sectPrs.length; k++) {
       var olds = wAll(sectPrs[k], 'headerReference');

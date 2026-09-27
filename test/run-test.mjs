@@ -962,19 +962,89 @@ async function docStats(buf) {
     const t = (ps[i].textContent || '').replace(/\s+/g, '');
     if (t) { paras++; chars += t.length; }
   }
-  return Object.assign(fieldStatsOf(xml), { chars, paras });
+  /* 包级统计。原先这里只数字数和段数，于是「每跑一遍多一个 header 部件、每个
+     _Toc 书签多一份副本」这类退化完全看不出来 —— 2026-09-27 实测连跑三遍
+     header 16→17→18、_Toc 书签 459→501→543，断言照样打印 ✓。 */
+  const names = Object.keys(z.files);
+  const bmNames = Array.from(d.getElementsByTagNameNS(W_NS, 'bookmarkStart'))
+    .map((b) => b.getAttributeNS(W_NS, 'name') || '').filter(Boolean);
+  const bmSeen = {};
+  let bmDup = 0, tocDup = 0;
+  for (const n of bmNames) {
+    if (bmSeen[n]) { bmDup++; if (/^_Toc/.test(n)) tocDup++; }
+    bmSeen[n] = true;
+  }
+  return Object.assign(fieldStatsOf(xml), {
+    chars, paras,
+    parts: names.length,
+    headers: names.filter((f) => /^word\/header\d*\.xml$/.test(f)).length,
+    footers: names.filter((f) => /^word\/footer\d*\.xml$/.test(f)).length,
+    bmTotal: bmNames.length,
+    bmUnique: Object.keys(bmSeen).length,
+    bmDup, tocDup,
+  });
 }
 const balanced = (s) => s.begin === s.end && s.depth === 0 && s.min === 0;
 
 const pass1 = await docStats(result.data);
 const again = await FormatTool.formatDocx(result.data, FormatTool.DEFAULTS, { format: 'nodebuffer' });
 const pass2 = await docStats(again.data);
-const idemOk = pass1.paras === pass2.paras && Math.abs(pass1.chars - pass2.chars) <= pass1.chars * 0.02;
+/* 稳定性 = 字数/段数不退化，**且**包部件数、页眉页脚部件数、书签总数与唯一名数
+   一模一样。_Toc 重名单独判死：它会让目录域的 HYPERLINK \l 跳到第一个同名书签，
+   点目录条目跳错页（作者原有的其它书签重名不归工具管，只报告不判死）。 */
+const idemOk = pass1.paras === pass2.paras && Math.abs(pass1.chars - pass2.chars) <= pass1.chars * 0.02 &&
+  pass1.parts === pass2.parts && pass1.headers === pass2.headers && pass1.footers === pass2.footers &&
+  pass1.bmTotal === pass2.bmTotal && pass1.bmUnique === pass2.bmUnique &&
+  pass1.tocDup === 0 && pass2.tocDup === 0;
 console.log(`✓ 域字符配平: 一遍 begin=${pass1.begin}/end=${pass1.end} 收尾深度=${pass1.depth} | ` +
   `二遍 begin=${pass2.begin}/end=${pass2.end} 收尾深度=${pass2.depth}`);
-console.log(`✓ 反复格式化稳定: 一遍 ${pass1.chars}字/${pass1.paras}段 → 二遍 ${pass2.chars}字/${pass2.paras}段`);
+console.log(`✓ 反复格式化稳定: 一遍 ${pass1.chars}字/${pass1.paras}段 → 二遍 ${pass2.chars}字/${pass2.paras}段 | ` +
+  `包部件 ${pass1.parts}→${pass2.parts}（页眉 ${pass1.headers}→${pass2.headers} / 页脚 ${pass1.footers}→${pass2.footers}）| ` +
+  `书签 ${pass1.bmTotal} 个/${pass1.bmUnique} 唯一名（_Toc 重名 ${pass1.tocDup}）→ ` +
+  `${pass2.bmTotal} 个/${pass2.bmUnique} 唯一名（_Toc 重名 ${pass2.tocDup}）`);
 if (!balanced(pass1) || !balanced(pass2) || !idemOk) {
-  throw new Error(`域字符不配平或反复格式化结果不稳定（一遍 ${pass1.chars}字/${pass1.paras}段，二遍 ${pass2.chars}字/${pass2.paras}段）`);
+  throw new Error('域字符不配平，或反复格式化后结果退化：' +
+    `一遍 ${pass1.chars}字/${pass1.paras}段 部件${pass1.parts}(页眉${pass1.headers}/页脚${pass1.footers}) ` +
+    `书签${pass1.bmTotal}/${pass1.bmUnique}唯一 _Toc重名${pass1.tocDup}；` +
+    `二遍 ${pass2.chars}字/${pass2.paras}段 部件${pass2.parts}(页眉${pass2.headers}/页脚${pass2.footers}) ` +
+    `书签${pass2.bmTotal}/${pass2.bmUnique}唯一 _Toc重名${pass2.tocDup}`);
+}
+
+/* 22b. 目录条目引用的书签必须真实存在，且每一个都唯一。
+       工具生成的目录条目是 PAGEREF _TocN 域（\h 超链接），书签不存在时 Word 显示
+       「错误！未定义书签。」；重名时只认第一个同名书签，点条目跳到错误位置。
+       这条同时能抓住两种退化：把作者的 _TocN 改名（引用悬空）、以及再叠加一份
+       同名副本（重名）—— 前者 idempotency 断言看不出来（计数照样稳定）。 */
+function tocRefStats(xml) {
+  const d = new DOMParser().parseFromString(xml, 'application/xml');
+  const defined = {};
+  let definedDup = 0;
+  const bms = Array.from(d.getElementsByTagNameNS(W_NS, 'bookmarkStart'));
+  for (const b of bms) {
+    const n = b.getAttributeNS(W_NS, 'name') || '';
+    if (!n) continue;
+    if (defined[n]) definedDup++;
+    defined[n] = true;
+  }
+  const refs = {};
+  const instrs = Array.from(d.getElementsByTagNameNS(W_NS, 'instrText'));
+  for (const it of instrs) {
+    const s = it.textContent || '';
+    const m = /(?:PAGEREF|HYPERLINK\s+"?\\l"?)\s+"?(_Toc\d+)/i.exec(s);
+    if (m) refs[m[1]] = true;
+  }
+  const missing = Object.keys(refs).filter((n) => !defined[n]);
+  return { definedCount: Object.keys(defined).length, definedDup, refCount: Object.keys(refs).length, missing };
+}
+const rel1 = tocRefStats(await (await JSZip.loadAsync(result.data)).file('word/document.xml').async('string'));
+const rel2 = tocRefStats(await (await JSZip.loadAsync(again.data)).file('word/document.xml').async('string'));
+const linkOk = rel1.refCount > 0 && rel1.missing.length === 0 && rel1.definedDup === 0 &&
+  rel2.refCount > 0 && rel2.missing.length === 0 && rel2.definedDup === 0;
+console.log(`✓ 目录书签可解析: 一遍 书签 ${rel1.definedCount} 个（重名 ${rel1.definedDup}）/ 条目引用 ${rel1.refCount} 个，悬空 ${rel1.missing.length} | ` +
+  `二遍 书签 ${rel2.definedCount} 个（重名 ${rel2.definedDup}）/ 条目引用 ${rel2.refCount} 个，悬空 ${rel2.missing.length}`);
+if (!linkOk) {
+  throw new Error('目录条目引用的书签悬空或重名（Word 会显示「错误！未定义书签。」或跳到错误位置）：' +
+    `一遍 悬空[${rel1.missing.join(',')}] 重名${rel1.definedDup}；二遍 悬空[${rel2.missing.join(',')}] 重名${rel2.definedDup}`);
 }
 
 // 输入文档自带孤儿域字符（旧目录只剩下一个 end）时，输出必须被修好
