@@ -3381,7 +3381,7 @@
     return { data: out, counts: counts, info: cls.info, settings: settings };
   }
 
-  var FormatTool = { VERSION: '1.7.0', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
+  var FormatTool = { VERSION: '1.7.1', DEFAULTS: DEFAULTS, formatDocx: formatDocx,
     classifyParas: classifyParas, outputName: outputName, extractFrontMatter: extractFrontMatter };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = FormatTool;
