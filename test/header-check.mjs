@@ -1,6 +1,8 @@
 /* 论文格式助手 —— 页眉精准检测脚本
  * 用法: node test/header-check.mjs [docx路径]
- * 默认检测: d:/毕业论文/CYX_20.0.docx
+ * 默认取项目根目录里版本号最大的 CYX_<n>.<n>.docx
+ *   （原先写死 d:/毕业论文/CYX_20.0.docx，该文件已不在根目录，直接跑会报"文档不存在"。
+ *     这里改成与 run-test.mjs / browser-e2e.mjs 同一套扫描口径，2026-09-26。）
  *
  * 正确检测要点(修正历史审查方法的缺陷):
  * 1. 遍历所有 headerReference,解析 rels 得到每个被引用 header 部件
@@ -24,12 +26,28 @@ const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const target = process.argv[2] || 'd:/毕业论文/CYX_20.0.docx';
+const ROOT = path.resolve(__dirname, '../..');
 
+/* 与 run-test.mjs / browser-e2e.mjs 同口径：先扫版本号最大的 CYX_<n>.<n>.docx */
+function defaultFixture() {
+  const ver = (n) => { const m = /^CYX_(\d+)\.(\d+)\.docx$/.exec(n); return m ? +m[1] * 1000 + +m[2] : -1; };
+  let names;
+  try { names = fs.readdirSync(ROOT); } catch (e) { return null; }
+  const best = names.filter((n) => ver(n) >= 0).sort((a, b) => ver(b) - ver(a))[0];
+  return best ? path.join(ROOT, best) : null;
+}
+
+const target = process.argv[2] || defaultFixture();
+
+if (!target) {
+  console.error('未指定文档，且 ' + ROOT + ' 下找不到 CYX_<n>.<n>.docx');
+  process.exit(1);
+}
 if (!fs.existsSync(target)) {
   console.error('文档不存在:', target);
   process.exit(1);
 }
+console.log('夹具:', path.basename(target));
 
 const zip = await JSZip.loadAsync(fs.readFileSync(target));
 const doc = new DOMParser().parseFromString(await zip.file('word/document.xml').async('string'), 'application/xml');

@@ -258,7 +258,11 @@
         var text = paraText(c).trim();
         var hasMath = allByNs(c, 'oMath', M_NS).length > 0;
         var hasDrawing = wAll(c, 'drawing').length > 0 || wAll(c, 'pict').length > 0;
-        if (!text && !hasDrawing) continue; // 纯空段落跳过
+        /* 纯空段落跳过。注意公式段：公式的文字在 m:t 里而不是 w:t 里，paraText()
+           取到的是空串，只按 !text && !hasDrawing 判会把整段丢掉 —— 段落进不了
+           paras，就永远轮不到 role='formula'，公式居中整个功能空转，而且不报错。
+           2026-09-27 实测：只含 oMath 的段落 counts.formula 恒为 0。 */
+        if (!text && !hasDrawing && !hasMath) continue;
         items.push({ p: c, text: text, hasMath: hasMath, hasDrawing: hasDrawing,
                      hasPageBreak: hasPageBreak(c), meta: paraMeta(c) });
       }
@@ -394,6 +398,16 @@
     var tocHasHead = tocIdx >= 0 && RE.toc.test(texts[tocIdx]);
     var tocEndIdx = tocIdx >= 0 ? tocEnd(paras, tocIdx, hasChapterStyle) : -1;
 
+    /* 图片段里常被作者敲进游离字符 —— 夹具第 3 章就是：按钮实物那张图所在的
+       段落里孤零零一个 "z"（大概是误触）。只按「无文字」判定的话这页会掉成
+       body，图不被计数，**整章图号从那里起全部前移一位**：作者写 图3.16/3.17，
+       工具给出 图3.16(重复)/图3.16，正文引用跟着全错。
+       空白之外只剩 1 个字符（含全角空格）仍按图片段算。之所以敢这么判：判据是
+       「整段文字去掉空白后 ≤1 字」，正文段落不可能这么短。 */
+    function isPicPara(p, tx) {
+      return !!p.hasDrawing && tx.replace(/[\s　]/g, '').length <= 1;
+    }
+
     /* 逐段归类 */
     var inBack = false;
     for (var i2 = 0; i2 < n; i2++) {
@@ -416,7 +430,7 @@
       if (RE.cap.test(tx)) { roles[i2] = 'caption'; continue; }  // 题注优先于参考文献/后置部分判定（附录里的图1、表1等）
       // 后置部分（附录）里的纯图片段也要认成 figure，否则会掉进下面的 body 分支，
       // 图题就永远不会被真题注化（附件8 要求附录内图表另行编号）
-      if (refIdx >= 0 && i2 > refIdx && !tx && paras[i2].hasDrawing) { roles[i2] = 'figure'; continue; }
+      if (refIdx >= 0 && i2 > refIdx && isPicPara(paras[i2], tx)) { roles[i2] = 'figure'; continue; }
       if (refIdx >= 0 && i2 > refIdx) {
         if (RE.ack.test(tx) || RE.app.test(tx)) { roles[i2] = 'h1'; inBack = true; }
         // 附录内小节（A.1、B.2 …）按二级标题排版；题注已在上面判过
@@ -425,7 +439,7 @@
         continue;
       }
       if (paras[i2].hasMath) { roles[i2] = 'formula'; continue; }
-      if (!tx && paras[i2].hasDrawing) { roles[i2] = 'figure'; continue; }                  // 纯图片段：不动
+      if (isPicPara(paras[i2], tx)) { roles[i2] = 'figure'; continue; }                     // 纯图片段：不动
       if (RE.h1.test(tx) || (!hasChapterStyle && RE.h1Alt.test(tx)) || RE.h1Word.test(tx)) { roles[i2] = 'h1'; continue; }
       /* 二/三级标题判定加长度守卫：正文长句（如「1.5倍…」「0.96英寸…」）不当作标题 */
       if (RE.h3.test(tx) && tx.length <= 40) { roles[i2] = 'h3'; continue; }
@@ -976,7 +990,19 @@
       var st = S[role];
       if (!st) continue;
       var p = paras[i].p;
-      if (role === 'formula') { setJc(doc, p, 'center'); continue; } // 公式：仅居中，字体不动
+      if (role === 'formula') {
+        /* 公式：仅居中，字体不动。
+           setJc 收的是 **pPr**，不是段落 —— 传 p 进去时 childByNs(p,'jc') 找不到
+           东西，insertInOrder 又把 pPr/r 都当成「不在 PPR_ORDER 里」（ci = -1），
+           一路落到 appendChild，于是 w:jc 被写成 w:p 的最后一个子元素、排在所有
+           run 后面。OOXML 里 w:jc 只能待在 w:pPr 内，Word 会判文档损坏或直接丢弃，
+           居中根本不生效。2026-09-27 探针实测：子元素顺序 `oMath → r → jc`，
+           jc 的父元素是 w:p。 */
+        var fPr = childByNs(p, 'pPr', W_NS);
+        if (!fPr) { fPr = createW(doc, 'pPr'); p.insertBefore(fPr, p.firstChild); }
+        setJc(doc, fPr, 'center');
+        continue;
+      }
       // 章节换页（一级标题之间换页、目录另起一页）由 normalizeChapterBreaks 统一处理
       if (role === 'tocItem') {
         var lc = tocIndentChars(paras[i].text);
@@ -1564,9 +1590,16 @@
     var curChap = '', curApp = false, figNo = 0, tabNo = 0, done = 0, placeholders = 0;
 
     /* 段落元素 → 角色。图和表共用同一个章号，必须顺着 body 一次走完，
-       不能先遍历图、再遍历表，否则跨章的序号会错。 */
-    var roleByEl = {};
-    for (var r = 0; r < paras.length; r++) roleByEl[paras[r].p] = roles[r];
+       不能先遍历图、再遍历表，否则跨章的序号会错。
+
+       必须用 Map，不能用对象：对象键会被 String() 强转，而**浏览器里
+       String(元素) 恒为 "[object Element]"**，所有段落会塌成同一个键，
+       查任何段落都只拿到最后一段的角色。2026-09-26 实测：同一份文档
+       Node+xmldom 写出 36 条真题注、真浏览器 0 条 —— 整条真题注功能静默失效，
+       而 normalizeFigureRefs 照旧把「图4-1」改成「图4.1」，正文引用和图题写法对不上。
+       xmldom 下 String(元素) 是元素自身的序列化 XML，键近似唯一，所以离线单测看不出来。 */
+    var roleByEl = new Map();
+    for (var r = 0; r < paras.length; r++) roleByEl.set(paras[r].p, roles[r]);
 
     /* 题注要跟图片/表格排在同一页，且自身不跨页 */
     function finishCaption(capEl, chap, no, name, seqName, isApp) {
@@ -1604,13 +1637,32 @@
       var el = kids[i];
 
       if (el.localName === 'p') {
-        var role = roleByEl[el];
+        var role = roleByEl.get(el);
         if (role === 'h1' || role === 'refHead') {
           /* 认不出章号（参考文献/致谢等）→ 停用编号，这些区域不误编成上一章的号 */
           var hText = paraText(el).trim();
           curChap = captionChapterNo(hText);
           curApp = RE.app.test(hText);          // 附录：图题用「图A1」而不是「图A.1」
           figNo = 0; tabNo = 0;
+          continue;
+        }
+        /* 图文同段：题注文字和图片写在同一个段落里，作者常见写法。
+           这种段落被 classifyParas 判成 caption 而不是 figure —— RE.cap 的判定
+           在图片判定之前，而图片判定要求「无文字」（!tx && hasDrawing）。
+           于是它既不占图号，也走不到下面的分支，**整章后续图号全部前移一位**。
+           2026-09-26 实测：夹具第 3 章源编号 3.1~3.7，输出成 3.1,3.1,3.2,…,3.6，
+           出现两个「图3.1」；正文里「布线图如下图3.3、图3.4所示」（指 PCB 正反面）
+           对应到了别的图。38 条题注里 23 条与源文档对不上。
+           这里**只推进计数器**：文字是作者写好的题注，重写反而有把图片一起
+           清掉的风险，所以这一段一个字都不动。 */
+        if (role === 'caption' && curChap && !isFrontElement(el, frontBoundary) &&
+            /^(图|Figure)/.test(paraText(el).trim()) &&
+            (wAll(el, 'drawing').length || wAll(el, 'pict').length)) {
+          /* 只占一个号，不去解析作者写的数字：能走到这里说明 RE.cap 已匹配
+             （否则不会是 caption 角色），号一定存在，但「图3.1」里 \d+ 贪婪
+             匹配到的是 3 而不是 1，解析出来反而把整章带偏 —— 2026-09-26 试过
+             max(figNo+1, 作者号)，第 3 章直接从 3.1 跳到 3.4。 */
+          figNo++;
           continue;
         }
         if (role !== 'figure') continue;

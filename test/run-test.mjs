@@ -17,16 +17,17 @@ const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
-/* 夹具查找：先认历史名单，名单落空再扫根目录里版本号最大的 CYX_<n>.<n>.docx。
-   作者每改一版论文，文件名就跟着变（CYX_20.0 → CYX_21.0）。只认死名单的话，
-   他一改名整套回归测试就静悄悄地不跑了 —— 2026-09-16 就踩到：名单停在
-   CYX_20.0，根目录里其实已经是 CYX_21.0。 */
+/* 夹具查找：先扫根目录里版本号最大的 CYX_<n>.<n>.docx，扫不到才回退历史名单。
+   顺序不能反 —— 作者每改一版论文文件名就跟着变（CYX_20.0 → CYX_21.0），死名单
+   排在前面的话新版本永远选不中。2026-09-26 实测：名单首位的 CYX_21.0.docx 是
+   9-08 的旧件，当天产出的 CYX_21.1.docx 一次都没被跑过 —— 原先那段"防止改名后
+   静悄悄不跑"的注释（2026-09-16 写下）因为顺序反了，从写下那天起就没生效。 */
 function findFixture(names) {
-  const hit = names.map((n) => path.join(ROOT, n)).find((f) => fs.existsSync(f));
-  if (hit) return hit;
   const ver = (n) => { const m = /^CYX_(\d+)\.(\d+)\.docx$/.exec(n); return m ? +m[1] * 1000 + +m[2] : -1; };
   const best = fs.readdirSync(ROOT).filter((n) => ver(n) >= 0).sort((a, b) => ver(b) - ver(a))[0];
-  return best ? path.join(ROOT, best) : null;
+  if (best) return path.join(ROOT, best);
+  const hit = names.map((n) => path.join(ROOT, n)).find((f) => fs.existsSync(f));
+  return hit || null;
 }
 const src = findFixture(['CYX_21.0.docx', 'CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx', 'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx', 'CYX_3.0.docx', 'CYX_毕业设计.docx', 'CYX2.0.docx']);
 const outFile = path.join(__dirname, 'output_格式化.docx');
@@ -93,6 +94,9 @@ for (const sp of Array.from(sectPrs)) {
   }
 }
 console.log(orderOk ? `✓ ${sectPrs.length} 个分节 pgSz/pgMar/docGrid 顺序正确` : '✗ sectPr 顺序错误');
+/* sectPr 子元素顺序错了 Word 会直接判「文档已损坏」——原先这里只打印 ✗ 不抛错，
+   跑完照样退出码 0 打印「全部校验通过」，等于没查 */
+if (!orderOk) throw new Error('sectPr 子元素顺序错误（Word 会判文档损坏）');
 
 // 抽样检查正文段落样式
 const paras = doc.getElementsByTagNameNS(W_NS, 'p');
@@ -125,6 +129,7 @@ for (const rPr of Array.from(rPrs).slice(0, 500)) {
   }
 }
 console.log(rprOk ? `✓ 抽查 ${rprChecked} 个 rPr 元素顺序正确` : '✗ rPr 顺序错误');
+if (!rprOk) throw new Error('rPr 子元素顺序错误（Word 会判文档损坏）');
 
 // 页脚校验
 if (c.footerAdded) {
@@ -133,20 +138,31 @@ if (c.footerAdded) {
   const hasCT = ct.includes('footer+xml');
   const hasRel = rels.includes('relationships/footer');
   const footers = Object.keys(zip.files).filter(f => /^word\/footer\d+\.xml$/.test(f));
-  console.log(`✓ 页脚: ContentTypes ${hasCT ? 'OK' : 'MISSING'} | rels ${hasRel ? 'OK' : 'MISSING'} | 部件 ${footers.join(', ')}`);
+  /* 原先这里无论有没有都打印 ✓（✓ 是写死的），缺部件也看不出来 */
+  console.log(`${hasCT && hasRel && footers.length ? '✓' : '✗'} 页脚: ContentTypes ${hasCT ? 'OK' : 'MISSING'}` +
+    ` | rels ${hasRel ? 'OK' : 'MISSING'} | 部件 ${footers.length ? footers.join(', ') : '无'}`);
+  if (!hasCT || !hasRel || !footers.length) {
+    throw new Error('声明了添加页脚却没有页脚部件，或缺 ContentTypes 声明 / rels 关联（正文会整篇没有页码）');
+  }
   for (const f of footers) {
     new DOMParser().parseFromString(await zip.file(f).async('string'), 'application/xml');
   }
   console.log('✓ 页脚部件解析通过');
 }
 
-// 页边距校验（附件8：2.5cm = 1418 twips）
+// 页边距校验（附件8：上下左右 2.5cm = 1418 twips，页眉 1.6cm ≈ 907，页脚 2.1cm ≈ 1191）
 const mar = Array.from(sectPrs[0]?.childNodes || []).find(n => n.nodeType === 1 && n.localName === 'pgMar');
 if (mar) {
   const top = mar.getAttributeNS(W_NS, 'top');
   const hdr = mar.getAttributeNS(W_NS, 'header');
   const ftr = mar.getAttributeNS(W_NS, 'footer');
-  console.log(`✓ 页边距 top=${top} (2.5cm≈1418) | 页眉距=${hdr} (1.6cm≈907) | 页脚距=${ftr} (2.1cm≈1191)`);
+  /* 原先只把数值念一遍、连比较都没有，括号里的期望值纯装饰 */
+  const marOk = top === '1418' && hdr === '907' && ftr === '1191';
+  console.log(`${marOk ? '✓' : '✗'} 页边距 top=${top} (应 1418) | 页眉距=${hdr} (应 907) | 页脚距=${ftr} (应 1191)`);
+  if (!marOk) throw new Error(`页边距不符合附件8（top=${top} header=${hdr} footer=${ftr}）`);
+} else {
+  console.error('✗ 分节里找不到 w:pgMar，页边距未设置');
+  throw new Error('分节缺少 w:pgMar');
 }
 
 /* ---------- 附件8 新规则校验 ---------- */
@@ -162,7 +178,25 @@ console.log(`✓ 固定20磅行距(line=400 exact)段落: ${exact400}`);
 const pbs = doc.getElementsByTagNameNS(W_NS, 'pageBreakBefore');
 console.log(`✓ 一级标题换页标记: ${pbs.length} 处`);
 
-// 3. 三线表（tblBorders top sz=12, bottom sz=12）
+/* 前置部分工具：摘要（第一个非 front 段落）之前的 body 直系元素不参与格式修改。
+   放在这里是为了让下面的三线表校验也能用它 —— 分母必须是**正文表**（排除封面表），
+   c.tables 是全量（含封面表），拿它当分母口径就错了。 */
+const bodyKids0 = Array.from(doc.getElementsByTagNameNS(W_NS, 'body')[0].childNodes).filter(n => n.nodeType === 1);
+const absParaIdx = bodyKids0.findIndex(e => e.localName === 'p' && /^摘\s*要/.test(
+  Array.from(e.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('').trim()));
+const frontCount = absParaIdx > 0 ? absParaIdx : 0;
+const isFront = (el) => {
+  if (frontCount <= 0) return false;
+  while (el) {
+    const p = el.parentNode;
+    if (p && p.nodeType === 1 && p.localName === 'body') return bodyKids0.indexOf(el) < frontCount;
+    el = p;
+  }
+  return false;
+};
+
+// 3. 三线表（tblBorders top sz=12, bottom sz=12）。封面表受前置保护、本就保留原边框，
+//    所以分母只能算正文表（与下面第 8 条 tblCount 同口径）
 const tblBorders = doc.getElementsByTagNameNS(W_NS, 'tblBorders');
 let threeLine = 0;
 for (const tb of Array.from(tblBorders)) {
@@ -173,7 +207,12 @@ for (const tb of Array.from(tblBorders)) {
       top.getAttributeNS(W_NS, 'sz') === '12' && bottom.getAttributeNS(W_NS, 'sz') === '12' &&
       insideV.getAttributeNS(W_NS, 'val') === 'none') threeLine++;
 }
-console.log(`✓ 表格顶底线 1.5磅(sz=12): ${threeLine}/${c.tables}`);
+const bodyTblCount = Array.from(doc.getElementsByTagNameNS(W_NS, 'tbl')).filter(t => !isFront(t)).length;
+console.log(`${threeLine === bodyTblCount ? '✓' : '✗'} 表格顶底线 1.5磅(sz=12): ${threeLine}/${bodyTblCount} 正文表` +
+  `（全文 ${c.tables} 表，含封面表 ${c.tables - bodyTblCount}）`);
+if (threeLine !== bodyTblCount) {
+  throw new Error(`有正文表格未套三线表（${threeLine}/${bodyTblCount}）`);
+}
 
 // 4. 分节页码（罗马/阿拉伯）
 const pgNumTypes = doc.getElementsByTagNameNS(W_NS, 'pgNumType');
@@ -221,21 +260,6 @@ console.log(`✓ 二级标题固定20磅行距: ${h2ok}/${h2n} 段（line=400 ex
 if (h2ok !== h2n) throw new Error('二级标题未改为固定 20 磅行距');
 
 /* ---------- v1.2 新规则校验 ---------- */
-
-/* 前置部分工具：摘要（第一个非 front 段落）之前的 body 直系元素不参与格式修改 */
-const bodyKids0 = Array.from(doc.getElementsByTagNameNS(W_NS, 'body')[0].childNodes).filter(n => n.nodeType === 1);
-const absParaIdx = bodyKids0.findIndex(e => e.localName === 'p' && /^摘\s*要/.test(
-  Array.from(e.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('').trim()));
-const frontCount = absParaIdx > 0 ? absParaIdx : 0;
-const isFront = (el) => {
-  if (frontCount <= 0) return false;
-  while (el) {
-    const p = el.parentNode;
-    if (p && p.nodeType === 1 && p.localName === 'body') return bodyKids0.indexOf(el) < frontCount;
-    el = p;
-  }
-  return false;
-};
 
 // 7. 图片段落单倍行距：正文含 w:drawing / w:pict 的段落 spacing 必须为 line=240 lineRule=auto
 //    （前置封面图片按"前两页不修改"保留原样）
@@ -489,6 +513,35 @@ for (let i = 0; i < bodyKids11.length; i++) {
 console.log(`✓ 题注: 五号宋体格式 ${capFmtOk}/${capTotal} | 位置(图题下/表题上) ${capPosOk}/${capTotal}`);
 if (capFmtOk !== capTotal || capPosOk !== capTotal) throw new Error('题注格式或位置不符合要求（五号宋体、图题在图片下、表题在表格上）');
 
+// 12b. 题注编号：同一章内的图号（表号）必须从 1 开始连续、不重号。
+//      这是「编号漏计」这一类 bug 的唯一有效探针 —— 2026-09-27 查出的三种形态
+//      （题注段自带图片 / 图片段里被敲进游离字符如夹具里那个 "z" / 其他）
+//      症状完全一样：某个图不占号，其后整章前移一位，出现两个「图3.16」，
+//      正文里「如下图3.3、图3.4所示」跟着全指错。
+//      按编号自身分组校验（图3.5 → 组「图3」第 5 号），不依赖章标题识别，
+//      所以章标题判错时这条不会跟着一起失效。图号与表号是两个独立序列。
+const capSeq = {};
+for (let i = 0; i < bodyKids11.length; i++) {
+  const e = bodyKids11[i];
+  if (e.localName !== 'p' || isFront(e)) continue;
+  const t = Array.from(e.getElementsByTagNameNS(W_NS, 't')).map(x => x.textContent).join('').trim();
+  const m = /^(图|表)\s*([A-Z]?\d+)(?:[.．](\d+))?/.exec(t);
+  if (!m) continue;
+  const key = m[1] + m[2];
+  (capSeq[key] = capSeq[key] || []).push(m[3] ? +m[3] : 1);   // 附录「图A1」无小数点，按第 1 号算
+}
+const badSeq = [];
+const grpKeys = Object.keys(capSeq);
+for (const k of grpKeys) {
+  const ns = capSeq[k].slice().sort((a, b) => a - b);
+  for (let i = 0; i < ns.length; i++) {
+    if (ns[i] !== i + 1) { badSeq.push(`${k}(${ns.join(',')})`); break; }
+  }
+}
+console.log(`✓ 题注编号: ${grpKeys.length} 组从 1 起连续无重号 ${grpKeys.length - badSeq.length}/${grpKeys.length}` +
+  (badSeq.length ? ` | 异常: ${badSeq.join(' ')}` : ''));
+if (badSeq.length) throw new Error(`题注编号不连续或有重号: ${badSeq.join(' ')}`);
+
 // 13. 题注移位单测：图题原本在图片上方、表题原本在表格下方时，自动移到图片正下方/表格正上方
 function buildCapTestDocx() {
   const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -522,6 +575,61 @@ const figBelowImg = figI > 0 && isImgCapP(capEls[figI - 1]);
 const tabAboveTbl = tabI >= 0 && capEls[tabI + 1] && capEls[tabI + 1].localName === 'tbl';
 console.log(`✓ 题注移位单测: 图题移到图片下方=${figBelowImg} | 表题移到表格上方=${tabAboveTbl}`);
 if (!figBelowImg || !tabAboveTbl) throw new Error('题注未自动移到图片下方/表格上方');
+
+// 13b. 公式段居中单测：w:jc 必须落在 w:pPr 里。
+//      setJc 收的是 **pPr** 不是段落；传段落进去时 childByNs(p,'jc') 找不到东西，
+//      insertInOrder 又把 pPr/r 都当成「不在 PPR_ORDER 里」（ci = -1），一路落到
+//      appendChild —— w:jc 被写成 w:p 的最后一个子元素，排在所有 run 后面。
+//      OOXML 里 w:jc 只能待在 w:pPr 内，Word 会判文档损坏或直接丢弃，且居中不生效。
+//      夹具里公式段落数为 0，真实文档走不到这条分支，所以只能靠构造文档来守。
+function buildFormulaTestDocx() {
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const M = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const P = (t) => `<w:p><w:r><w:t>${esc(t)}</w:t></w:r></w:p>`;
+  // 两种公式段都要守：
+  //   mathP   —— 带编号文字（w:t 非空），一直能进 paras，原先会写出非法 w:jc；
+  //   pureMathP —— 只有 oMath、w:t 为空，原先被 collectParas 当空段整段丢掉，
+  //                role='formula' 永远不成立，公式居中整个功能空转。
+  const mathP = `<w:p><m:oMath xmlns:m="${M}"><m:r><m:t>y=2</m:t></m:r></m:oMath><w:r><w:t>（3-2）</w:t></w:r></w:p>`;
+  const pureMathP = `<w:p><m:oMath xmlns:m="${M}"><m:r><m:t>x=1</m:t></m:r></m:oMath></w:p>`;
+  const body = P('1 绪  论') + P('正文内容。') + mathP + pureMathP + P('正文继续。');
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    `<w:document xmlns:w="${W}" xmlns:m="${M}"><w:body>${body}` +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+    '</w:body></w:document>';
+  return JSZip().file('word/document.xml', xml)
+    .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    .generateAsync({ type: 'nodebuffer' });
+}
+const fmR = await FormatTool.formatDocx(await buildFormulaTestDocx(), FormatTool.DEFAULTS, { format: 'nodebuffer' });
+const fmDoc = new DOMParser().parseFromString(
+  await (await JSZip.loadAsync(fmR.data)).file('word/document.xml').async('string'), 'application/xml');
+/* ① 通用结构守卫：全文任何 w:jc 的父元素都必须是 w:pPr */
+const strayJc = Array.from(fmDoc.getElementsByTagNameNS(W_NS, 'jc'))
+  .filter(j => !j.parentNode || j.parentNode.localName !== 'pPr')
+  .map(j => `<w:${j.parentNode ? j.parentNode.localName : '?'}>`);
+/* ② 公式段自身：pPr 必须在最前，且 jc=center */
+const M_NS_TEST = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
+/* 一个段落里可能有多个 oMath，按段落去重后逐段检查 */
+const fmParas = [];
+for (const mo of Array.from(fmDoc.getElementsByTagNameNS(M_NS_TEST, 'oMath'))) {
+  const par = mo.parentNode;
+  if (par && par.localName === 'p' && fmParas.indexOf(par) < 0) fmParas.push(par);
+}
+let fmCentered = 0;
+const fmOrders = [];
+for (const par of fmParas) {
+  const kids = Array.from(par.childNodes).filter(n => n.nodeType === 1);
+  fmOrders.push(kids.map(n => n.localName).join(' → '));
+  const pr = kids[0] && kids[0].localName === 'pPr' ? kids[0] : null;
+  const jc = pr && Array.from(pr.childNodes).find(n => n.localName === 'jc');
+  if (pr && jc && jc.getAttributeNS(W_NS, 'val') === 'center') fmCentered++;
+}
+const fmOk = fmParas.length === 2 && fmCentered === 2;
+console.log(`✓ 公式段单测: ${fmParas.length} 段，pPr 置顶且居中 ${fmCentered}/${fmParas.length}` +
+  ` | 结构: ${fmOrders.join(' ／ ')}` + (strayJc.length ? ` | 游离 w:jc 父元素: ${strayJc.join(', ')}` : ''));
+if (strayJc.length || !fmOk) throw new Error('公式段未居中，或 w:jc 未写入 w:pPr（w:jc 不是 w:p 的合法子元素，Word 会判文档损坏）');
 
 // 14. 章节换页规整化单测：
 //     无分节符/分页符 → 在标题前的空段上加 pageBreakBefore（空段换页，标题紧随新页顶部）；

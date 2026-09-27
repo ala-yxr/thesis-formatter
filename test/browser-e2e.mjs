@@ -37,16 +37,16 @@ if (!browser) {
   process.exit(1);
 }
 
-/* 夹具查找：先认历史名单，名单落空再扫根目录里版本号最大的 CYX_<n>.<n>.docx。
-   作者每改一版论文，文件名就跟着变（CYX_20.0 → CYX_21.0）。只认死名单的话，
-   他一改名整套测试就静悄悄地不跑了 —— 2026-09-16 就踩到：名单停在 CYX_20.0，
-   根目录里其实已经是 CYX_21.0。 */
+/* 夹具查找：先扫根目录里版本号最大的 CYX_<n>.<n>.docx，扫不到才回退历史名单。
+   顺序不能反 —— 作者每改一版论文文件名就跟着变（CYX_20.0 → CYX_21.0），死名单
+   排在前面的话新版本永远选不中。2026-09-26 实测：名单首位的 CYX_21.0.docx 是
+   9-08 的旧件，当天产出的 CYX_21.1.docx 一次都没被跑过。 */
 function findFixture(names) {
-  const hit = names.map((n) => path.join(ROOT, n)).find((f) => fs.existsSync(f));
-  if (hit) return hit;
   const ver = (n) => { const m = /^CYX_(\d+)\.(\d+)\.docx$/.exec(n); return m ? +m[1] * 1000 + +m[2] : -1; };
   const best = fs.readdirSync(ROOT).filter((n) => ver(n) >= 0).sort((a, b) => ver(b) - ver(a))[0];
-  return best ? path.join(ROOT, best) : null;
+  if (best) return path.join(ROOT, best);
+  const hit = names.map((n) => path.join(ROOT, n)).find((f) => fs.existsSync(f));
+  return hit || null;
 }
 const fixture = findFixture(['CYX_21.0.docx', 'CYX_20.0.docx', 'CYX_14.0.docx', 'CYX_12.0.docx', 'CYX_11.0.docx',
   'CYX_10.0.docx', 'CYX_8.0.docx', 'CYX_6.0.docx', 'CYX_5.0.docx', 'CYX_4.0.docx',
@@ -206,6 +206,62 @@ window.addEventListener('unhandledrejection', function (e) {
     reportLog('带换行变体: 输出 ' + spStats.chars + ' 字/' + spStats.paras + ' 段（保留 ' +
       (srcStats.chars ? Math.round(spStats.chars / srcStats.chars * 100) : 0) + '%）' +
       ' | 域配平 begin=' + spFld.begin + ' end=' + spFld.end + ' 收尾深度=' + spFld.depth);
+
+    /* 公式段：夹具里公式段落数为 0，这条路径离线跑不到，只能构造文档。
+       必须验两件事 ——
+         ① w:jc 只能待在 w:pPr 里（setJc 收的是 pPr；曾把段落当 pPr 传，
+            w:jc 被 appendChild 成 w:p 的最后一个子元素，Word 判文档损坏）；
+         ② 纯公式段（只有 oMath、w:t 为空）也要能被收进来并居中 ——
+            collectParas 原先只按 !text && !hasDrawing 判空段，把整段丢掉，
+            公式居中整个功能空转。
+       特意放在浏览器里跑：C1 就是「Node 过、浏览器挂」，离线单测看不出来。 */
+    var MW = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    var MM = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
+    var fz = JSZip();
+    fz.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="' + MW + '" xmlns:m="' + MM + '"><w:body>' +
+      '<w:p><w:r><w:t>1 绪  论</w:t></w:r></w:p>' +
+      '<w:p><w:r><w:t>正文内容。</w:t></w:r></w:p>' +
+      '<w:p><m:oMath><m:r><m:t>y=2</m:t></m:r></m:oMath><w:r><w:t>（3-2）</w:t></w:r></w:p>' +
+      '<w:p><m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath></w:p>' +
+      '<w:p><w:r><w:t>正文继续。</w:t></w:r></w:p>' +
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+      '</w:body></w:document>');
+    fz.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>');
+    var fr = await FormatTool.formatDocx(await fz.generateAsync({ type: 'arraybuffer' }),
+      FormatTool.DEFAULTS, { format: 'blob' });
+    var fDoc = new DOMParser().parseFromString(
+      await (await JSZip.loadAsync(fr.data)).file('word/document.xml').async('string'), 'application/xml');
+    var strayJc2 = 0, jcs2 = fDoc.getElementsByTagNameNS(MW, 'jc');
+    for (var ji = 0; ji < jcs2.length; ji++) {
+      if (!jcs2[ji].parentNode || jcs2[ji].parentNode.localName !== 'pPr') strayJc2++;
+    }
+    var fParas = [], oms2 = fDoc.getElementsByTagNameNS(MM, 'oMath');
+    for (var oi = 0; oi < oms2.length; oi++) {
+      var op = oms2[oi].parentNode;
+      if (op && op.localName === 'p' && fParas.indexOf(op) < 0) fParas.push(op);
+    }
+    var fCent = 0;
+    for (var fi = 0; fi < fParas.length; fi++) {
+      var fk = fParas[fi].childNodes, firstEl = null, prEl = null;
+      for (var ki = 0; ki < fk.length; ki++) {
+        if (fk[ki].nodeType !== 1) continue;
+        if (!firstEl) firstEl = fk[ki];
+        if (fk[ki].localName === 'pPr') prEl = fk[ki];
+      }
+      var jcEl = null;
+      if (prEl) for (var mi = 0; mi < prEl.childNodes.length; mi++) {
+        if (prEl.childNodes[mi].nodeType === 1 && prEl.childNodes[mi].localName === 'jc') jcEl = prEl.childNodes[mi];
+      }
+      if (prEl && firstEl === prEl && jcEl && jcEl.getAttributeNS(MW, 'val') === 'center') fCent++;
+    }
+    reportLog('公式段: ' + fParas.length + ' 段，pPr 置顶且居中 ' + fCent + '/' + fParas.length +
+      ' | 游离 w:jc ' + strayJc2 + ' 个 | 空命名空间节点 ' + fr.counts.emptyNsNodes);
   } catch (e) {
     reportLog('异常: ' + (e && e.message));
   }
@@ -290,6 +346,17 @@ const spLine = (report.match(/带换行变体: 输出 (\d+) 字/) || []);
 const spChars = Number(spLine[1] || 0);
 if (!spChars || spChars < srcChars * 0.9) {
   console.error('\n✗ 带换行的文档处理失败：' + (spLine[0] || '检查项缺失'));
+  process.exit(1);
+}
+/* 公式段（构造文档，夹具里公式段落为 0，只能这样守）：
+   w:jc 必须全在 w:pPr 里，且纯公式段也要被收到并居中 */
+const fmLine = report.match(/公式段: (\d+) 段，pPr 置顶且居中 (\d+)\/(\d+) \| 游离 w:jc (\d+) 个 \| 空命名空间节点 (\d+)/);
+if (!fmLine) {
+  console.error('\n✗ 公式段检查项缺失');
+  process.exit(1);
+}
+if (Number(fmLine[1]) !== 2 || fmLine[2] !== fmLine[3] || Number(fmLine[4]) !== 0 || Number(fmLine[5]) !== 0) {
+  console.error('\n✗ 公式段处理有误：' + fmLine[0]);
   process.exit(1);
 }
 const badLines = report.split('\n').filter((l) =>
