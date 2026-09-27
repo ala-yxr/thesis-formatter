@@ -262,6 +262,55 @@ window.addEventListener('unhandledrejection', function (e) {
     }
     reportLog('公式段: ' + fParas.length + ' 段，pPr 置顶且居中 ' + fCent + '/' + fParas.length +
       ' | 游离 w:jc ' + strayJc2 + ' 个 | 空命名空间节点 ' + fr.counts.emptyNsNodes);
+
+    /* 页码页脚：addFooter 原先拿「[Content_Types].xml 里第一条 footer 类型的 Override」
+       的 PartName 当 target，部件已经存在就一个字都不写 —— 复用到的必定是别人的页脚
+       （封面那一节自带的空页脚，或上一版工具留在包里的残留）。各分节被指过去之后正文
+       整篇没有页码，而 counts.footerAdded 仍是 true，app.js 照报「已添加页码」。
+       夹具正文本来就有页脚引用，hasFooterRef 为 true，这条路径在夹具上跑不到。
+       同样放在浏览器里跑：C1 的教训就是「Node 过、浏览器挂」。 */
+    var SR = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    var staleFtr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:ftr xmlns:w="' + MW + '"><w:p><w:pPr><w:jc w:val="center"/></w:pPr></w:p></w:ftr>';
+    var sz = JSZip();
+    sz.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="' + MW + '" xmlns:r="' + SR + '"><w:body>' +
+      '<w:p><w:r><w:t>1 绪  论</w:t></w:r></w:p>' +
+      '<w:p><w:r><w:t>正文内容，测试页码用。</w:t></w:r></w:p>' +
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+      '</w:body></w:document>');
+    sz.file('word/footer1.xml', staleFtr);
+    sz.file('word/_rels/document.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="' + SR + '/footer" Target="footer1.xml"/></Relationships>');
+    sz.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>');
+    var sr = await FormatTool.formatDocx(await sz.generateAsync({ type: 'arraybuffer' }),
+      FormatTool.DEFAULTS, { format: 'blob' });
+    var szOut = await JSZip.loadAsync(sr.data);
+    var szDoc = await szOut.file('word/document.xml').async('string');
+    var szRelsXml = await szOut.file('word/_rels/document.xml.rels').async('string');
+    var szMap = {}, szRm = szRelsXml.match(/<Relationship\\b[^>]*>/g) || [];
+    for (var ri = 0; ri < szRm.length; ri++) {
+      var idm = /Id="([^"]+)"/.exec(szRm[ri]), tmm = /Target="([^"]+)"/.exec(szRm[ri]);
+      if (idm) szMap[idm[1]] = tmm ? tmm[1].replace(/^\\.?\\//, '').replace(/^word\\//, '') : '';
+    }
+    var szRefs = szDoc.match(/<w:footerReference\\b[^>]*>/g) || [];
+    var szWithPage = 0;
+    for (var qi = 0; qi < szRefs.length; qi++) {
+      var qid = /r:id="([^"]+)"/.exec(szRefs[qi]);
+      var qpart = qid && szMap[qid[1]] ? 'word/' + szMap[qid[1]] : null;
+      if (!qpart || !szOut.file(qpart)) continue;
+      if (/PAGE/.test(await szOut.file(qpart).async('string'))) szWithPage++;
+    }
+    var szStaleKept = (await szOut.file('word/footer1.xml').async('string')) === staleFtr;
+    reportLog('页码页脚: ' + szRefs.length + ' 个分节引用，指向含 PAGE 域的 ' + szWithPage +
+      ' 个 | footerAdded=' + sr.counts.footerAdded + ' | 旧空页脚未被改写=' + szStaleKept);
   } catch (e) {
     reportLog('异常: ' + (e && e.message));
   }
@@ -270,6 +319,19 @@ window.addEventListener('unhandledrejection', function (e) {
 })();
 setTimeout(function () { reportSend('看门狗: 超时未完成'); }, 150000);
 <\/script></body></html>`;
+
+/* PAGE 是模板字面量，里面写的反斜杠会被**模板自己**吃掉一层：正则里的 `\.` `\/` `\b`
+   到页面里就变成 `.` `/` 退格符，`/^.?//` 直接是语法错误。页面里所有正则都必须写 `\\`。
+   2026-09-27 就是这么挂的：三处新写的 `\b`/`\/` 让整页 Uncaught SyntaxError，而离线单测
+   全绿（run-test.mjs 是独立文件，压根不走模板）。\b \f \v \0 这几个转义吃出来的是控制
+   字符，页面里绝不可能是有意为之 —— 出现即报错，别等到浏览器里才发现。 */
+const ctrl = PAGE.match(/[\u0008\u000b\u000c\u0000]/);
+if (ctrl) {
+  const at = PAGE.slice(0, ctrl.index).split('\n').length;
+  console.error(`\n✗ PAGE 模板里出现了控制字符 ${JSON.stringify(ctrl[0])}（第 ${at} 行）：` +
+    '多半是正则里的反斜杠少写了一层 —— 模板字面量会吃掉一层，页面里得写 \\\\b、\\\\/');
+  process.exit(1);
+}
 
 let onReport;
 const reported = new Promise((r) => { onReport = r; });
@@ -357,6 +419,17 @@ if (!fmLine) {
 }
 if (Number(fmLine[1]) !== 2 || fmLine[2] !== fmLine[3] || Number(fmLine[4]) !== 0 || Number(fmLine[5]) !== 0) {
   console.error('\n✗ 公式段处理有误：' + fmLine[0]);
+  process.exit(1);
+}
+/* 页码页脚（构造文档：包里有个空页脚部件、正文没有页脚引用）：
+   每个分节引用都必须指向含 PAGE 域的页脚，且那个旧空页脚不许被改写 */
+const pgLine = report.match(/页码页脚: (\d+) 个分节引用，指向含 PAGE 域的 (\d+) 个 \| footerAdded=(\w+) \| 旧空页脚未被改写=(\w+)/);
+if (!pgLine) {
+  console.error('\n✗ 页码页脚检查项缺失');
+  process.exit(1);
+}
+if (Number(pgLine[1]) < 1 || pgLine[1] !== pgLine[2] || pgLine[3] !== 'true' || pgLine[4] !== 'true') {
+  console.error('\n✗ 页码页脚处理有误：' + pgLine[0]);
   process.exit(1);
 }
 const badLines = report.split('\n').filter((l) =>

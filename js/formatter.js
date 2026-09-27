@@ -2539,27 +2539,39 @@
     return 'rId' + (max + 1);
   }
 
+  /* 页码页脚一律**新建**部件，绝不复用包里已有的页脚。
+     原先的写法是「在 [Content_Types].xml 里找第一条 footer 类型的 Override，把它的
+     PartName 当 target；部件已经存在就不写内容」—— 于是复用到的必定是**别人的**页脚：
+     封面/摘要那一节自带的（通常是个空段落），或者上一版工具留在包里的残留。各分节的
+     footerReference 被指过去之后，正文一页页码都没有，而 counts.footerAdded 仍然是
+     true，UI 照报「已添加页码」。2026-09-27 探针实测：输入 = 登记了 word/footer1.xml
+     （空段落、无 PAGE 域）+ 正文没有任何 footerReference，跑完 2 个分节引用全指向
+     footer1，含 PAGE 域的引用 0 个，footerAdded = true。
+     能走到这里就说明 hasFooterRef 已经是 false —— 正文各节确确实实没有页脚，包里那些
+     页脚部件只可能属于被 frontSectPrs 跳过的那几节，复用一定是错的，所以不再挑部件。 */
   async function addFooter(zip, doc, s) {
     var ctDoc = new DOMParser().parseFromString(await zip.file('[Content_Types].xml').async('string'), 'application/xml');
+    /* 编号要同时避开「已存在的文件」和「Content_Types 里已登记的 PartName」：只按文件推的话，
+       碰到登记了却没有实体（Word 里删掉页脚后很常见）的 footer3.xml，会再登记一条同
+       PartName 的 Override，Word 判包损坏。 */
+    var used = 0;
+    var mf = 0;
+    var files = Object.keys(zip.files);
+    for (var i = 0; i < files.length; i++) {
+      mf = /^word\/footer(\d+)\.xml$/.exec(files[i]);
+      if (mf) used = Math.max(used, parseInt(mf[1], 10));
+    }
     var overrides = ctDoc.getElementsByTagName('Override');
-    var existing = null;
-    for (var i = 0; i < overrides.length; i++) {
-      if (overrides[i].getAttribute('ContentType') === CT_FOOTER) { existing = overrides[i]; break; }
+    for (var k = 0; k < overrides.length; k++) {
+      mf = /^\/word\/footer(\d+)\.xml$/.exec(overrides[k].getAttribute('PartName') || '');
+      if (mf) used = Math.max(used, parseInt(mf[1], 10));
     }
-
-    var target = existing ? existing.getAttribute('PartName').replace(/^\//, '') : null;
-    if (!target) {
-      var n = 1;
-      while (zip.file('word/footer' + n + '.xml')) n++;
-      target = 'word/footer' + n + '.xml';
-      var ov = ctDoc.createElementNS(CT_NS, 'Override');
-      ov.setAttribute('PartName', '/' + target);
-      ov.setAttribute('ContentType', CT_FOOTER);
-      ctDoc.documentElement.appendChild(ov);
-      zip.file(target, footerXml(s.pageNumber === 'right' ? 'right' : 'center'));
-    } else if (!zip.file(target)) {
-      zip.file(target, footerXml(s.pageNumber === 'right' ? 'right' : 'center'));
-    }
+    var target = 'word/footer' + (used + 1) + '.xml';
+    var ov = ctDoc.createElementNS(CT_NS, 'Override');
+    ov.setAttribute('PartName', '/' + target);
+    ov.setAttribute('ContentType', CT_FOOTER);
+    ctDoc.documentElement.appendChild(ov);
+    zip.file(target, footerXml(s.pageNumber === 'right' ? 'right' : 'center'));
     zip.file('[Content_Types].xml', serialize(ctDoc, '[Content_Types].xml'));
 
     // relationships

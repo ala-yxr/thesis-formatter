@@ -1180,4 +1180,72 @@ if (!tblTextOk) {
   throw new Error('表格内文字未按附件8 统一为五号宋体 + Times New Roman，或底纹未清/封面被误改');
 }
 
+// 25. 页码页脚不得复用包里已有的页脚部件。
+//     addFooter 原先是「在 [Content_Types].xml 里找第一条 footer 类型的 Override，拿它的
+//     PartName 当 target；部件已经存在就不写内容」，于是复用到的必定是**别人的**页脚 ——
+//     封面/摘要那一节自带的空页脚，或者上一版工具留在包里的残留。各分节被指过去之后，
+//     正文一页页码都没有，而 counts.footerAdded 仍是 true，app.js 照报「已添加页码」。
+//     2026-09-27 探针实测：输入里登记了 word/footer1.xml（空段落、无 PAGE 域）、正文没有
+//     任何 footerReference，跑完 2 个分节引用全指向 footer1，含 PAGE 域的引用 0 个。
+//     夹具 CYX_*.docx 自带 7 个页脚部件、正文本来就有页脚引用，hasFooterRef 为 true，
+//     addFooter 根本不被调用 —— 所以只能靠构造文档来守。
+function buildStaleFooterDocx() {
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const P = (t) => `<w:p><w:r><w:t>${esc(t)}</w:t></w:r></w:p>`;
+  const stale = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    `<w:ftr xmlns:w="${W}"><w:p><w:pPr><w:jc w:val="center"/></w:pPr></w:p></w:ftr>`;
+  const body = P('1 绪  论') + P('正文内容，测试页码用。') + P('1.1 研究背景') + P('正文第二段。');
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${body}` +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1800" w:right="1800"/></w:sectPr>' +
+    '</w:body></w:document>';
+  const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    `<Relationship Id="rId1" Type="${R}/footer" Target="footer1.xml"/></Relationships>`;
+  return {
+    stale,
+    zip: JSZip().file('word/document.xml', xml)
+      .file('word/footer1.xml', stale)
+      .file('word/_rels/document.xml.rels', rels)
+      .file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>')
+      .generateAsync({ type: 'nodebuffer' }),
+  };
+}
+const sfIn = await buildStaleFooterDocx();
+const sfRes = await FormatTool.formatDocx(await sfIn.zip, FormatTool.DEFAULTS, { format: 'nodebuffer' });
+const sfz = await JSZip.loadAsync(sfRes.data);
+const sfDocXml = await sfz.file('word/document.xml').async('string');
+const sfRels = {};
+for (const m of (await sfz.file('word/_rels/document.xml.rels').async('string')).matchAll(/<Relationship\b[^>]*>/g)) {
+  const id = (/Id="([^"]+)"/.exec(m[0]) || [])[1];
+  const t = (/Target="([^"]+)"/.exec(m[0]) || [])[1];
+  if (id) sfRels[id] = String(t || '').replace(/^\.?\//, '').replace(/^word\//, '');
+}
+const sfRefs = [...sfDocXml.matchAll(/<w:footerReference\b[^>]*>/g)];
+let sfWithPage = 0;
+const sfTargets = [];
+for (const fref of sfRefs) {
+  const rid = (/r:id="([^"]+)"/.exec(fref[0]) || [])[1];
+  const tgt = sfRels[rid];
+  const part = tgt ? 'word/' + tgt : null;
+  if (!part || !sfz.file(part)) { sfTargets.push(`${rid}→${part || '?'}(部件缺失)`); continue; }
+  const xml = await sfz.file(part).async('string');
+  const ok = /PAGE/.test(xml);
+  if (ok) sfWithPage++;
+  sfTargets.push(`${rid}→${part}${ok ? '(有PAGE)' : '(无PAGE)'}`);
+}
+const sfStaleKept = (await sfz.file('word/footer1.xml').async('string')) === sfIn.stale;
+const sfOk = sfRefs.length > 0 && sfWithPage === sfRefs.length && sfStaleKept;
+console.log(`✓ 页码页脚不复用旧部件: ${sfRefs.length} 个分节引用全部指向含 PAGE 域的页脚=` +
+  `${sfWithPage === sfRefs.length}/${sfRefs.length} | 旧空页脚未被改写=${sfStaleKept} | ${sfTargets.join(' ')}`);
+if (!sfOk) {
+  throw new Error('页码页脚复用了包里已有的页脚部件（正文整篇没有页码，却仍报「已添加页码」），或旧部件被改写');
+}
+
 console.log('\n全部校验通过 ✔');
